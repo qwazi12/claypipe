@@ -261,8 +261,32 @@
   therefore renders an explicit Caveats block quoting this entry whenever the
   run's backend is `dummy` or its scores are absent, so an operator can never
   read an unscored page as a pass.
+- **D26 (2026-09-09) Auto-checkpoint safety net: `.claude/hooks/checkpoint.sh`
+  on the Stop hook.** Operator asked for passive, persistent saving to GitHub and
+  memory.md. That is an automated behaviour, so it is a HOOK — an instruction to
+  the model cannot fire on an event. The script logs to memory.md, commits and
+  pushes whenever the tree is dirty at the end of a turn, and is silent when the
+  tree is clean (the normal case, since step commits are deliberate).
+  Safety properties, all tested: refuses to commit when a secret-shaped FILENAME
+  is present or when staged CONTENT matches a credential pattern (verified — a
+  planted fake `ghp_` token was refused and unstaged); never force-pushes; never
+  rewrites history; exits 0 on every failure path so a session is never blocked;
+  reports a PUSH FAILED message rather than pretending GitHub is in sync.
+  Auto-commits are labelled `chore: auto-checkpoint` so they stay distinguishable
+  from the deliberate P2 step commits — those remain the real checkpoints.
+  **NOT YET ARMED.** Writing `.claude/settings.json` was blocked by the
+  permission classifier, in both the Bash and Write paths. The script is
+  committed and working; registering it as a Stop hook needs the operator. See
+  the "Arming the auto-checkpoint hook" note in Pending.
 
 ## Pending / Next
+- **ARM THE AUTO-CHECKPOINT HOOK (operator action, D26).** `.claude/settings.json`
+  does not exist yet; creating it was blocked by the permission classifier. The
+  hook script is committed at `.claude/hooks/checkpoint.sh` and verified working.
+  To arm it, either run `/hooks` and add a Stop hook running
+  `bash "$CLAUDE_PROJECT_DIR/.claude/hooks/checkpoint.sh"`, or create
+  `.claude/settings.json` by hand with that Stop hook entry. Until then, saving
+  stays manual (which is what every step so far has done anyway).
 - ~~A4 — Drive folder ID~~ CLOSED as out of scope by operator direction, see D8.
   Cross-repo integration deferred; ClayPipe's output dir is the contract surface.
 - Step 2 — scoring module. DONE, green. D9 and D10 CLOSED by Decisions 1 and 2.
