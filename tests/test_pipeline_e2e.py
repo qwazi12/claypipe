@@ -234,6 +234,16 @@ def test_cli_round_trip(test_clip: Path, run_dir: Path) -> None:
     assert intake.exit_code == 0, intake.output
     run_path = Path(intake.stdout.strip().splitlines()[-1])
 
+    # STAGE 1 gate: batch refuses to start until a human has approved the
+    # canary. Asserted here as well as in test_retry.py, because the ordering
+    # is part of the end-to-end contract, not just a unit-level rule.
+    blocked = runner.invoke(app, ["batch", str(run_path), "--runs-dir", str(run_dir)])
+    assert blocked.exit_code == 1 and "canary gate" in blocked.output
+
+    (run_path / "canary_verdict.json").write_text(
+        json.dumps({"approved": True, "reviewer": "test", "note": "offline dummy run"})
+    )
+
     batch = runner.invoke(app, ["batch", str(run_path), "--runs-dir", str(run_dir)])
     assert batch.exit_code == 0, batch.output
     assert f"{EXPECTED_FRAMES} frames restyled" in batch.stdout
@@ -245,6 +255,16 @@ def test_cli_round_trip(test_clip: Path, run_dir: Path) -> None:
     status = runner.invoke(app, ["status", str(run_path), "--runs-dir", str(run_dir)])
     assert status.exit_code == 0
     assert f"extracted={EXPECTED_FRAMES}" in status.stdout
+
+    # Every restyle call was ledgered, even at the dummy backend's zero price:
+    # the ledger is the audit trail, not just an accountant.
+    ledger = run_path / "spend_ledger.jsonl"
+    assert ledger.is_file()
+    authorized = [
+        json.loads(line) for line in ledger.read_text().splitlines()
+        if line.strip() and json.loads(line)["event"] == "authorized"
+    ]
+    assert len(authorized) == EXPECTED_FRAMES
 
 
 def test_cli_rejects_unknown_style(test_clip: Path, run_dir: Path) -> None:

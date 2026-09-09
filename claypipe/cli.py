@@ -19,6 +19,7 @@ from .pipeline import assemble as assemble_stage
 from .pipeline import qccard
 from .pipeline.extract import count_frames, extract_audio, extract_frames
 from .pipeline.restyle import get_backend, restyle_frames
+from .pipeline.retry import RunHalted, SpendLedger, require_canary_approval
 from .run import Run, resolve_run
 
 app = typer.Typer(
@@ -103,17 +104,30 @@ def intake(
 def batch(
     run_dir: Path = typer.Argument(..., help="Run directory or run id"),
     runs_dir: Optional[Path] = typer.Option(None, "--runs-dir"),
+    max_cost_usd: Optional[float] = typer.Option(
+        None, "--max-cost-usd",
+        help="Hard cap on this run's cumulative API spend. Halts before the "
+             "call that would breach it.",
+    ),
 ) -> None:
     """STAGE 2 — extract frames + audio, then restyle every frame.
 
-    The canary gate that must block this stage lands in Build Order step 3;
-    today the only available backend is the free offline one.
+    Blocked by the canary gate: without an approved `canary_verdict.json` this
+    command refuses to start. There is no override flag, deliberately.
     """
-    styles, _, _ = _startup()
+    styles, weights, _ = _startup()
     base = runs_dir or styles.output.runs_dir
     try:
         run = Run.load(resolve_run(run_dir, Path(base)))
     except (FileNotFoundError, ValueError) as exc:
+        _fail(str(exc))
+
+    # FIREWALL 1: no approved canary verdict -> no spend. Checked before the
+    # backend is even constructed.
+    try:
+        require_canary_approval(run.paths, run.logger)
+    except RunHalted as exc:
+        run.logger.error("batch.blocked", breach=exc.breach.value, error=str(exc))
         _fail(str(exc))
 
     profile = styles.profile(run.manifest.style)
@@ -121,6 +135,11 @@ def batch(
         backend = get_backend(run.manifest.backend)
     except (NotImplementedError, ValueError) as exc:
         _fail(str(exc))
+
+    ledger = SpendLedger(
+        paths=run.paths, project_dir=Path(base), cfg=weights.firewalls,
+        run_id=run.run_id, logger=run.logger, max_cost_usd_run=max_cost_usd,
+    )
 
     source = Path(run.manifest.source_path)
     if not source.is_file():
@@ -136,7 +155,11 @@ def batch(
             prompt=profile.prompt,
             strength=profile.strength,
             logger=run.logger,
+            ledger=ledger,
         )
+    except RunHalted as exc:
+        run.logger.error("batch.halted", breach=exc.breach.value, error=str(exc))
+        _fail(str(exc))
     except Exception as exc:  # surfaced, never swallowed
         run.logger.error("batch.failed", error=str(exc))
         _fail(str(exc))

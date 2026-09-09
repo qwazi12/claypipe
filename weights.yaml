@@ -90,3 +90,38 @@ models:
   # the checkpoint was never trained to emit.
   identity_model: ViT-B-32-quickgelu
   identity_pretrained: openai # open_clip checkpoint tag
+
+# --------------------------------------------------------------------------
+# Cost firewalls (SPEC §4, brief §7). These are hard circuit-breakers, not
+# warnings: every one of them halts the run and writes an incident note.
+# --------------------------------------------------------------------------
+firewalls:
+  # Per-frame retry cap. A frame that has burned this many retries goes to the
+  # human queue rather than being retried a third time.
+  max_retries_per_frame: 2
+
+  # Whole-run retry budget, as a fraction of frame count. A clip needing more
+  # retries than this has a systemic prompt problem, not frame problems, and
+  # throwing more API money at it is the exact failure pattern being designed
+  # out. Breach pauses the run and waits for a human.
+  total_retry_budget_fraction: 0.15
+
+  # Applied to a BORDERLINE frame's first retry (SPEC §3).
+  borderline_strength_delta: -0.10
+
+  # Kill switch: never discover a bad run at frame 700.
+  kill_switch:
+    after_frames: 50
+    min_mean_f: 0.70
+
+  cost:
+    # Estimated USD per restyle call, per backend. Charged to the ledger BEFORE
+    # the call is made, then reconciled with the actual afterwards.
+    estimated_usd_per_call:
+      dummy: 0.0
+      fal: 0.035
+    # Hard caps. null = uncapped. `--max-cost-usd` overrides the run cap.
+    # The PROJECT cap is SPEC Addendum A3: the per-run cap alone does not stop
+    # ten aborted runs at $19 each costing $190.
+    max_cost_usd_run: null
+    max_cost_usd_project: null

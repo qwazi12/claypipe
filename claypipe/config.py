@@ -177,6 +177,55 @@ class ModelsConfig(BaseModel):
     identity_pretrained: str
 
 
+class KillSwitchConfig(BaseModel):
+    model_config = {"extra": "forbid"}
+
+    after_frames: int = Field(gt=0)
+    min_mean_f: float = Field(ge=0.0, le=1.0)
+
+
+class CostConfig(BaseModel):
+    model_config = {"extra": "forbid"}
+
+    estimated_usd_per_call: dict[str, float]
+    max_cost_usd_run: float | None = None
+    max_cost_usd_project: float | None = None
+
+    @model_validator(mode="after")
+    def _non_negative(self) -> "CostConfig":
+        for backend, usd in self.estimated_usd_per_call.items():
+            if usd < 0:
+                raise ValueError(f"cost estimate for {backend!r} is negative: {usd}")
+        for name in ("max_cost_usd_run", "max_cost_usd_project"):
+            cap = getattr(self, name)
+            if cap is not None and cap <= 0:
+                raise ValueError(f"firewalls.cost.{name} must be positive or null, got {cap}")
+        return self
+
+    def per_call(self, backend: str) -> float:
+        """Estimated spend for one call. An unpriced backend is a hard error:
+        an unknown price must never be silently treated as free."""
+        try:
+            return self.estimated_usd_per_call[backend]
+        except KeyError:
+            raise ConfigError(
+                f"no cost estimate for backend {backend!r} in "
+                f"firewalls.cost.estimated_usd_per_call (have: "
+                f"{sorted(self.estimated_usd_per_call)}). Refusing to spend "
+                "against an unknown price."
+            ) from None
+
+
+class FirewallConfig(BaseModel):
+    model_config = {"extra": "forbid"}
+
+    max_retries_per_frame: int = Field(ge=0)
+    total_retry_budget_fraction: float = Field(gt=0.0, le=1.0)
+    borderline_strength_delta: float = Field(lt=0.0)
+    kill_switch: KillSwitchConfig
+    cost: CostConfig
+
+
 class WeightsConfig(BaseModel):
     model_config = {"extra": "forbid"}
 
@@ -187,6 +236,7 @@ class WeightsConfig(BaseModel):
     canny: CannyConfig
     temporal: TemporalConfig
     models: ModelsConfig
+    firewalls: FirewallConfig
 
 
 def _load_yaml(path: Path) -> dict:

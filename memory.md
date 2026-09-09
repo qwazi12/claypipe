@@ -1,6 +1,10 @@
 # MEMORY — ClayPipe
 
 ## Current State
+- **Steps 1, 2 and 3 of 6 are COMPLETE and green.** 99 tests pass warm;
+  65 pass / 34 skip / 0 fail on a cold clone.
+- All five cost firewalls are live and enforced: canary gate, per-frame retry
+  cap, whole-run retry budget, kill switch, run + project spend caps.
 - **Steps 1 and 2 of 6 are COMPLETE and green.** Step 1: the pipeline runs
   end-to-end offline (intake -> batch -> assemble). Step 2: `pipeline/score.py`
   implements the composite F score over 11 synthetic fixture cases.
@@ -180,16 +184,50 @@
   bullet as written could not be met, so it is recorded rather than glossed.
   Note `gaussian_blurred` sits 0.005 from its target: that fixture is knife-edge
   and its verdict may flip on a library upgrade.
+- **D17 (2026-09-09) The canary gate is enforced at the `batch` COMMAND
+  boundary, not inside the pipeline API.** SPEC §4.1 says "batch mode REFUSES to
+  run", so `cli.batch` calls `require_canary_approval()` before it even
+  constructs a backend. There is deliberately NO override flag: an escape hatch
+  would defeat the only gate between a bad prompt and a full batch of paid calls.
+  Consequence to know: a library caller invoking `restyle_frames()` directly
+  bypasses the gate. That is why the SPEND LEDGER lives one layer down, at the
+  call site — the gate controls stage ordering, the ledger controls money, and
+  the money control cannot be stepped around.
+  Verified live, not just in tests: no verdict -> exit 1, 0 frames produced;
+  `approved: false` -> exit 1; `approved: true` -> 60 frames.
+- **D18 (2026-09-09) AMBIGUITY IN THE BRIEF, resolved toward the specific rule.**
+  Decision 1's prose says a `targets_missed` frame is BORDERLINE and takes "the
+  same retry-and-flag path as today: one retry with strength -0.10, then human
+  queue". The Step-3 acceptance bullet instead says `targets_missed` "triggers
+  the same retry path as `F < 0.65`" — which is the FAIL path, i.e. a NEW SEED.
+  These are different actions. Implemented per the Decision 1 prose
+  (strength -0.10, seed retained), because it is the more specific and more
+  detailed statement, and because a BORDERLINE frame is a near miss that a
+  strength nudge can plausibly rescue while a reseed throws away a nearly-good
+  result. `test_decision1_targets_missed_triggers_a_retry` asserts the property
+  both readings agree on — that the frame IS retried and consumes budget.
+  **Flag for the operator: say the word if you want the reseed path instead.**
+- **D19 (2026-09-09) The PROJECT-level spend cap is implemented, per SPEC
+  Addendum A3.** The 2026-09-09 resume brief §7.4 restates only the per-run
+  `--max-cost-usd`; it does not mention the project cap and does not revoke A3,
+  which remained in this file's Pending list. Implemented as a shared
+  `project_spend_ledger.jsonl` in the runs directory plus
+  `firewalls.cost.max_cost_usd_project` (default null = uncapped), so it is
+  inert unless deliberately configured. Rationale unchanged from A3: the per-run
+  cap cannot see previous runs, so ten aborted runs at $19 each still cost $190.
+  Surfaced rather than added silently — say the word if you want it dropped.
 
 ## Pending / Next
 - ~~A4 — Drive folder ID~~ CLOSED as out of scope by operator direction, see D8.
   Cross-repo integration deferred; ClayPipe's output dir is the contract surface.
 - Step 2 — scoring module. DONE, green. D9 and D10 CLOSED by Decisions 1 and 2.
-- Step 3 — retry + firewalls. IN PROGRESS, cleared to build.
-- D15 open (TF flags real motion) and D16 recorded — neither blocks step 3.
+- Step 3 — retry + firewalls. DONE, green.
+- D15 open (TF flags real motion), D16 recorded, D18 open (targets_missed retry
+  path — reseed or strength nudge?), D19 open (keep the project cap?). None of
+  these blocks step 4.
+- Step 4 — human gate HTML pages. CLEARED TO BUILD. Note it must WRITE the
+  `canary_verdict.json` that step 3 now reads, and `review_verdicts.json`.
 - D12 open: how should styles with no character (e.g. `logo`) score ID?
-- Step 3 — retry + cost firewalls, incl. A3 cumulative PROJECT-level spend cap
-  (the per-run `--max-cost-usd` alone does not stop ten aborted runs costing 10×).
 - Step 4 — human gate HTML pages; Step 5 — FalBackend; Step 6 — CLI polish + README.
 - A2 — Flux Kontext vs SDXL+ControlNet stays deferred until after the first real
   canary. Do not pre-optimize.
@@ -198,6 +236,21 @@
 - RUNBOOK.md / CONFIG.md (Rule 33) not written yet — due with step 6.
 
 ## Log (append-only, newest first)
+
+### 2026-09-09 — Step 3 shipped: retry policy + five cost firewalls
+- Built `pipeline/retry.py`: `RetryController` (per-frame cap, whole-run budget,
+  kill switch), `SpendLedger` (authorize-before-call, reconcile-after, run and
+  project totals), `require_canary_approval()`, and incident notes for every
+  breach. All numbers come from a new `firewalls:` block in `weights.yaml`.
+- Wired the canary gate and the ledger into `cli.batch`; `--max-cost-usd` added.
+- `restyle_frames()` now authorises every call to the ledger BEFORE executing it
+  and reconciles the actual after. `reconcile()` requires the id that only
+  `authorize()` returns, so an unledgered call is not expressible.
+- 19 new tests in `tests/test_retry.py`, all five named acceptance tests green.
+  One pre-existing e2e test failed on the new gate — the gate working correctly;
+  updated to approve the canary first, mirroring the real Stage 1 -> Stage 2 flow.
+- Retry actions branch on the verdict REASON (Decision 1), not the verdict alone.
+- Total 99 tests green. Step 4 NOT started.
 
 ### 2026-09-09 — Decisions 1 and 2 applied; D9/D10 closed
 - `weights.yaml`: `require_component_targets: true`, `tf_min` 0.80 -> 0.95, with

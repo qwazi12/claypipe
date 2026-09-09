@@ -86,6 +86,7 @@ def restyle_frames(
     strength: float,
     logger: RunLogger,
     seed_for: "callable[[int], int] | None" = None,
+    ledger: "object | None" = None,
 ) -> int:
     """Restyle every source frame. Resume-safe: an existing output is never
     re-generated, so a crashed run never re-spends (SPEC §2).
@@ -107,7 +108,14 @@ def restyle_frames(
         if dst.is_file():
             skipped += 1
             continue
+        # Every call is authorised and written to the spend ledger BEFORE it
+        # executes; a cap breach raises out of here, untried and unpaid.
+        entry_id = None
+        if ledger is not None:
+            entry_id = ledger.authorize(frame=src.name, backend=backend.name, stage="batch")
         backend.restyle(src, dst, prompt=prompt, strength=strength, seed=seed_for(idx))
+        if ledger is not None and entry_id is not None:
+            ledger.reconcile(entry_id, backend.cost_per_frame_usd())
         done += 1
 
     logger.info(
