@@ -101,6 +101,11 @@ class RunPaths:
         return self.root / "final_comparison.mp4"
 
     @property
+    def scores(self) -> Path:
+        """Per-frame score log (SPEC §3): one JSON object per scored frame."""
+        return self.root / "scores.jsonl"
+
+    @property
     def qc_card(self) -> Path:
         return self.root / "qc_card.json"
 

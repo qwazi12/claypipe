@@ -19,6 +19,8 @@ from .pipeline import assemble as assemble_stage
 from .pipeline import qccard
 from .pipeline.extract import count_frames, extract_audio, extract_frames
 from .pipeline.restyle import get_backend, restyle_frames
+from .pipeline.retry import RetryController
+from .pipeline.score import Scorer, ScoringError, load_image
 from .pipeline.retry import RunHalted, SpendLedger
 from .run import Run, resolve_run
 from .verdi import loaders as verdi_loaders
@@ -64,10 +66,15 @@ def intake(
     style: str = typer.Option(..., "--style", "-s", help="Style profile from styles.yaml"),
     title: Optional[str] = typer.Option(None, "--title", help="Header bar text (default: filename)"),
     fps: Optional[int] = typer.Option(None, "--fps", help="Extraction fps (default: styles.yaml)"),
-    backend: str = typer.Option("dummy", "--backend", help="Restyle backend: dummy"),
+    backend: str = typer.Option("dummy", "--backend", help="Restyle backend: dummy | fal"),
     runs_dir: Optional[Path] = typer.Option(None, "--runs-dir", help="Override output directory"),
+    ref: list[Path] = typer.Option(
+        [], "--ref",
+        help="Character reference image to lock for identity scoring. Repeatable. "
+             "Required for any backend that scores (i.e. anything but dummy).",
+    ),
 ) -> None:
-    """STAGE 0 — register a clip and create its run directory."""
+    """STAGE 0 — register a clip and lock its style + character references."""
     styles, _, _ = _startup()
     try:
         styles.profile(style)
@@ -80,6 +87,10 @@ def intake(
     except ffmpeg.FFmpegError as exc:
         _fail(str(exc))
 
+    for image in ref:
+        if not image.is_file():
+            _fail(f"reference image not found: {image}")
+
     run = Run.create(
         source=video,
         style=style,
@@ -90,6 +101,9 @@ def intake(
         styles=styles,
         runs_dir=runs_dir,
     )
+    if ref:
+        run.manifest.reference_images = [str(p.resolve()) for p in ref]
+        run.save()
     run.logger.info(
         "intake",
         source=str(video),
@@ -97,6 +111,7 @@ def intake(
         fps=run.manifest.fps,
         backend=backend,
         duration_s=duration,
+        references=len(ref),
     )
     typer.echo(run.paths.root)
 
@@ -189,6 +204,63 @@ def _effective_prompt(run: Run, profile) -> str:
     return override
 
 
+def _build_scoring(run: Run, weights, backend, frame_count: int, profile):
+    """Build the Scorer and RetryController — except on the dummy backend.
+
+    SCORING IS SKIPPED FOR `dummy`, deliberately and permanently (memory.md D27).
+    The dummy's whole visual difference from the source is a posterise plus a
+    deterministic `1.0 + (seed % 7) * 0.05` saturation nudge; there is no
+    generative content to grade. Scoring it would manufacture numbers that look
+    like quality measurements while measuring nothing, and would run LPIPS and
+    CLIP over every frame of every offline test run to do it.
+
+    On any other backend the scorer is mandatory: a paid run that is not scored
+    is a paid run nobody can defend.
+    """
+    if backend.name == "dummy":
+        run.logger.info(
+            "batch.scoring.skipped",
+            backend=backend.name,
+            reason="dummy backend produces no generative content to grade (D27)",
+        )
+        return None, None, []
+
+    references = [Path(p) for p in run.manifest.reference_images]
+    missing = [str(p) for p in references if not p.is_file()]
+    if missing:
+        _fail(
+            "reference images locked at intake are missing: "
+            + ", ".join(missing)
+            + "\nRefusing to start a paid run whose identity metric cannot be computed."
+        )
+    if not references:
+        # Fail BEFORE the ledger authorises anything, rather than at frame 1
+        # with money already spent (memory.md D12 is still open for `logo`).
+        _fail(
+            f"backend {backend.name!r} scores every frame, and identity scoring "
+            "needs at least one Stage-0 reference image (F weights ID at 0.20 "
+            "and the formula is fixed). Re-run intake with --ref <image> ... "
+            "before spending."
+        )
+
+    try:
+        scorer = Scorer.build(weights)
+        loaded = [load_image(p) for p in references]
+    except ScoringError as exc:
+        _fail(str(exc))
+
+    controller = RetryController(
+        cfg=weights, paths=run.paths, frame_count=frame_count,
+        base_strength=profile.strength, logger=run.logger,
+    )
+    run.logger.info(
+        "batch.scoring.enabled",
+        backend=backend.name, references=len(loaded),
+        retry_budget=controller.retry_budget,
+    )
+    return scorer, controller, loaded
+
+
 @app.command()
 def batch(
     run_dir: Path = typer.Argument(..., help="Run directory or run id"),
@@ -240,6 +312,13 @@ def batch(
     try:
         extracted = extract_frames(source, run.paths.source_frames, run.manifest.fps, run.logger)
         extract_audio(source, run.paths.audio, run.logger)
+    except Exception as exc:
+        run.logger.error("batch.failed", error=str(exc))
+        _fail(str(exc))
+
+    scorer, controller, references = _build_scoring(run, weights, backend, extracted, profile)
+
+    try:
         total = restyle_frames(
             backend=backend,
             source_dir=run.paths.source_frames,
@@ -248,6 +327,10 @@ def batch(
             strength=profile.strength,
             logger=run.logger,
             ledger=ledger,
+            scorer=scorer,
+            controller=controller,
+            references=references,
+            scores_path=run.paths.scores,
         )
     except RunHalted as exc:
         run.logger.error("batch.halted", breach=exc.breach.value, error=str(exc))
@@ -261,7 +344,19 @@ def batch(
             f"frame-count mismatch: {extracted} extracted vs "
             f"{count_frames(run.paths.restyled_frames)} restyled"
         )
-    typer.echo(f"{extracted} frames restyled with backend '{backend.name}'")
+    if controller is not None:
+        summary = controller.summary()
+        run.logger.info("batch.scoring.summary", **summary)
+        typer.echo(
+            f"{extracted} frames restyled with backend '{backend.name}' — "
+            f"mean F {summary['mean_f']}, {summary['total_retries']} retries "
+            f"of a {summary['retry_budget']} budget"
+        )
+    else:
+        typer.echo(
+            f"{extracted} frames restyled with backend '{backend.name}' "
+            "(not scored — see memory.md D27)"
+        )
 
 
 @app.command()

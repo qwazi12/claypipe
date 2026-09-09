@@ -278,6 +278,28 @@
   permission classifier, in both the Bash and Write paths. The script is
   committed and working; registering it as a Stop hook needs the operator. See
   the "Arming the auto-checkpoint hook" note in Pending.
+- **D27 (2026-09-09) Scoring is SKIPPED for the `dummy` backend, permanently.**
+  The dummy's entire visual difference from the source is a posterise plus
+  `saturation = 1.0 + (seed % 7) * 0.05` (`restyle.py`) — a deterministic palette
+  nudge with no generative content. Scoring it would manufacture numbers that
+  look like quality measurements while measuring nothing, and would run LPIPS and
+  CLIP inference over every frame of every offline test run to do it. The skip is
+  logged (`batch.scoring.skipped`) and printed ("not scored"), so an ungraded run
+  READS as ungraded — the opposite of silent. On any other backend the scorer is
+  mandatory: a paid run that is not scored is a paid run nobody can defend.
+- **D28 (2026-09-09) A paid run with no locked reference images is refused BEFORE
+  the ledger authorises anything.** Identity carries weight 0.20 in a fixed
+  formula, so with no reference there is no defined score (D12). Discovering that
+  at frame 1 would mean money already spent, so the check runs at startup.
+  `intake` gained `--ref` (repeatable) to lock Stage-0 references; it was skipped
+  in Step 1 as speculative and is now genuinely required.
+- **D29 (2026-09-09) QC-card cost is derived from the SPEND LEDGER, never from a
+  backend branch.** The card previously hardcoded zeros when `backend == "dummy"`.
+  Inferring cost from which backend was selected reports a plausible number
+  instead of the real one, and can quietly disagree with the ledger the firewalls
+  actually enforce against. Scores likewise come from `scores.jsonl`, and a run
+  that was never scored reports `null` rather than zero — an unmeasured run must
+  never read as a clean one.
 
 ## Pending / Next
 - **ARM THE AUTO-CHECKPOINT HOOK (operator action, D26).** `.claude/settings.json`
@@ -309,6 +331,20 @@
 - RUNBOOK.md / CONFIG.md (Rule 33) not written yet — due with step 6.
 
 ## Log (append-only, newest first)
+
+### 2026-09-09 — Step 5 commit 2: Scorer + RetryController wired (D25 closed)
+- `restyle_frames` now threads a Scorer and a RetryController; every frame on a
+  paid backend is scored, recorded to `scores.jsonl`, and retried per the policy.
+- Two firewalls proved themselves against my own test scaffolding rather than in
+  theory: the ledger REFUSED an unpriced stub backend, and the 15% retry budget
+  HALTED a stub that never recovered (9 retries on 60 frames). Both are now
+  regression tests.
+- Calibration note: a perfect backend (restyled == source) with a reference drawn
+  from the same clip scores SSIM 1.000 / LPIPS 0.000 / ID 1.000 / TF ~0.996 —
+  comfortably PASS. A reference from an UNRELATED image fails identity on every
+  frame and burns the retry budget, which is correct behaviour and worth knowing
+  before the first real canary.
+- 147 green.
 
 ### 2026-09-09 — Step 5 commit 1: canary gate wired into cli.batch
 - `cli.batch` now consults `verdi.loaders` instead of `retry.require_canary_approval`.
