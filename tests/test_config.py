@@ -65,7 +65,3 @@ def test_missing_config_file_is_a_hard_error(tmp_path: Path) -> None:
     with pytest.raises(ConfigError, match="missing config file"):
         load_styles(tmp_path / "nope.yaml")
 
-
-def test_drive_folder_id_is_not_invented() -> None:
-    """SPEC A4: TBD until the operator supplies it. Never a placeholder."""
-    assert load_styles().output.drive_folder_id is None

@@ -52,8 +52,6 @@ class RunManifest(BaseModel):
     style: str
     fps: int
     backend: str
-    # SPEC A4: only ever set from config/operator input, never invented.
-    drive_folder_id: str | None = None
     reference_images: list[str] = Field(default_factory=list)
 
 
@@ -155,7 +153,6 @@ class Run:
             style=style,
             fps=fps,
             backend=backend,
-            drive_folder_id=styles.output.drive_folder_id,
         )
         run = cls(paths=paths, manifest=manifest, logger=RunLogger(run_id, paths.log, echo))
         run.save()

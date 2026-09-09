@@ -67,8 +67,6 @@ class OutputConfig(BaseModel):
     model_config = {"extra": "forbid"}
 
     runs_dir: Path
-    # SPEC A4: TBD until the operator supplies it. Never invented.
-    drive_folder_id: str | None = None
 
 
 class StyleProfile(BaseModel):

@@ -23,11 +23,10 @@ render:
     - /usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf
 
 output:
-  # Where finished runs are written (SPEC A4: configurable output directory).
+  # Where finished runs are written. ClayPipe's contract surface ends here:
+  # it produces final_comparison.mp4 in this directory and stops. Anything
+  # downstream (uploads, schedulers, distribution) lives in another repo.
   runs_dir: runs
-  # Google Drive folder that SocialPilot AI round-robin-ingests (SPEC A4).
-  # TBD — the operator must supply this. NEVER invent an ID here.
-  drive_folder_id: null
 
 styles:
   clay:

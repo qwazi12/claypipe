@@ -24,11 +24,15 @@
 - Project venv at `.venv` (gitignored).
 
 ## Decisions
-- **D1 (2026-09-08) Header bar is a PIL-rendered PNG overlay, not `drawtext`.**
-  SPEC §6 asks for `drawtext`; the installed ffmpeg has no such filter, which is
-  the "hard blocker" escape hatch in the Tech Stack section. A 1080×N header PNG
-  is composited with `overlay`. Verified, not assumed: `ffmpeg -filters | grep -w
-  drawtext` → no match.
+- **D1 (2026-09-08, OPERATOR-APPROVED 2026-09-09) Header bar is a PIL-rendered
+  PNG overlay, not `drawtext`.** SPEC §6 asks for `drawtext`; Homebrew's ffmpeg 8
+  ships without it (no harfbuzz), which is the "hard blocker" escape hatch in the
+  Tech Stack section. A 1080×N header PNG is composited with `overlay`. Verified,
+  not assumed: `ffmpeg -filters | grep -w drawtext` → no match.
+  **This is what we ship.** Do NOT "fix" it by reinstalling or pinning a
+  different ffmpeg build — the Pillow path is the approved design, not a
+  workaround awaiting repair. Caption burn-in is unaffected: libass IS present,
+  so SRT burn-in stays on the `subtitles=` filter.
 - **D2 (2026-09-08) Audio sync guarantee is a packet-level MD5 equality check.**
   `ffmpeg -i X -map 0:a -c copy -f md5 -` on the extracted `audio.aac` and on
   `final_comparison.mp4`; mismatch is a hard fail (SPEC Hard Rules).
@@ -56,13 +60,27 @@
   MP4, so a naive packet hash reports a difference that is pure framing (453 vs
   460 bytes on frame 1, identical 236-packet counts). The bsf strips ADTS headers
   and is a verified no-op on MP4. Without this the sync check false-alarms.
+- **D8 (2026-09-09, OPERATOR-DIRECTED) Cross-repo integration deferred;
+  ClayPipe's output dir is the contract surface.** `output.drive_folder_id` and
+  its null-gate test are DELETED from `styles.yaml`, `config.py`, `run.py` and
+  `tests/test_config.py`. ClayPipe produces `final_comparison.mp4` and stops.
+  Drive uploads, SocialPilot round-robin, schedulers and social hooks belong to
+  other repos.
+  **AUTHORITY CONFLICT — read this before following SPEC.md.** The field was not
+  invented last session: SPEC.md Addendum A4 explicitly instructs adding it
+  ("Add a configurable output directory (and optionally a Drive folder ID)").
+  The operator's 2026-09-09 build brief reverses that decision. **The build brief
+  supersedes SPEC.md A4.** SPEC.md was left unedited (changing it was not
+  authorised), so a future session reading SPEC.md alone WILL be tempted to
+  re-add this. Do not. If it seems needed, surface the choice to the operator.
+  (For the record: the field was a plain `null` YAML entry with a comment — it
+  was never encrypted or obfuscated, contrary to the brief's §14 characterisation.
+  Nothing was stored, and no ID was ever invented.)
 
 ## Pending / Next
-- **A4 — BLOCKED ON OPERATOR: the Google Drive folder ID is TBD.** Do not invent
-  one. `output.drive_folder_id` in `styles.yaml` stays `null` until the operator
-  supplies it. It decides whether ClayPipe output feeds an existing brand's
-  round-robin or needs a new sheet tab in SocialPilot AI.
-- Step 2 — scoring module (SSIM / LPIPS-on-edges / ID / TF). Await operator GO.
+- ~~A4 — Drive folder ID~~ CLOSED as out of scope by operator direction, see D8.
+  Cross-repo integration deferred; ClayPipe's output dir is the contract surface.
+- Step 2 — scoring module (SSIM / LPIPS-on-edges / ID / TF). IN PROGRESS.
 - Step 3 — retry + cost firewalls, incl. A3 cumulative PROJECT-level spend cap
   (the per-run `--max-cost-usd` alone does not stop ten aborted runs costing 10×).
 - Step 4 — human gate HTML pages; Step 5 — FalBackend; Step 6 — CLI polish + README.
@@ -73,6 +91,16 @@
 - RUNBOOK.md / CONFIG.md (Rule 33) not written yet — due with step 6.
 
 ## Log (append-only, newest first)
+
+### 2026-09-09 — Resume: two deviations resolved before any new code
+- D1 (PIL header overlay) APPROVED by operator as a deliberate, permanent design
+  choice. Recorded as ship-state, not a pending repair.
+- D8: `output.drive_folder_id` DELETED from styles.yaml, config.py, run.py and
+  tests/test_config.py per operator direction. Suite 20 -> 19 tests, still green.
+  The deleted test asserted only that a null-only field was null, so it
+  constrained no behaviour — the operator is right that it tested nothing.
+- Logged the SPEC.md-vs-build-brief authority conflict under D8 so the next agent
+  does not re-add the field by following SPEC.md A4.
 
 ### 2026-09-08 — Step 1 shipped: offline pipeline end-to-end, first commit
 - Built: `config.py` (pydantic + YAML, validated on startup), `ffmpeg.py`
