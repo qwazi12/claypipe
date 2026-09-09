@@ -300,6 +300,19 @@
   actually enforce against. Scores likewise come from `scores.jsonl`, and a run
   that was never scored reports `null` rather than zero — an unmeasured run must
   never read as a clean one.
+- **D30 (2026-09-09) The canary's third frame is the LAST frame, not the
+  most-motion shot — a STATED stand-in.** SPEC §4.1 asks for first / middle /
+  most-motion, but shot detection (`shots.py`) has never been assigned a build
+  step: the Build Order goes scoring -> firewalls -> gates -> Fal -> polish and
+  never lands it. Rather than invent a motion heuristic mid-step, the third slot
+  samples the far end of the clip and the PAGE SAYS SO ("last frame (stand-in
+  for most-motion)"). An operator reading the canary can therefore tell that the
+  hardest shot may not be represented — which is the risk a silent substitution
+  would have hidden. **`shots.py` remains unassigned; it needs a build slot.**
+- **D31 (2026-09-09) `canary_verdict.json` is written atomically.** The gate
+  polls that path, so a half-written file could be caught mid-read. Written to
+  `.json.tmp` then `Path.replace`d, which is atomic within a filesystem. Proven
+  by intercepting the rename, not by inspection.
 
 ## Pending / Next
 - **ARM THE AUTO-CHECKPOINT HOOK (operator action, D26).** `.claude/settings.json`
@@ -331,6 +344,16 @@
 - RUNBOOK.md / CONFIG.md (Rule 33) not written yet — due with step 6.
 
 ## Log (append-only, newest first)
+
+### 2026-09-09 — Step 5 commits 3-5: canary render / pack / submit
+- `claypipe canary render|pack|submit` close the loop Step 4 left open: the
+  pages existed but nothing generated them and nothing recorded the verdict.
+- render also emits the FLAG page when the run has scores, so a reviewer sees
+  what the scorer already flagged; it says so plainly when nothing is graded.
+- Live demo: 77,512-byte canary page, three inlined frames, zero external refs;
+  pack prints a file:// URL and starts no server; submit round-trips an
+  "adjust" verdict with its prompt override and echoes per-frame decisions.
+- 10 new tests, 157 green.
 
 ### 2026-09-09 — Step 5 commit 2: Scorer + RetryController wired (D25 closed)
 - `restyle_frames` now threads a Scorer and a RetryController; every frame on a

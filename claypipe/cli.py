@@ -17,12 +17,13 @@ from . import __version__, ffmpeg
 from .config import ConfigError, load_all
 from .pipeline import assemble as assemble_stage
 from .pipeline import qccard
-from .pipeline.extract import count_frames, extract_audio, extract_frames
+from .pipeline.extract import count_frames, extract_audio, extract_frames, frame_paths
 from .pipeline.restyle import get_backend, restyle_frames
 from .pipeline.retry import RetryController
 from .pipeline.score import Scorer, ScoringError, load_image
 from .pipeline.retry import RunHalted, SpendLedger
 from .run import Run, resolve_run
+from .verdi import canary_page, flag_page
 from .verdi import loaders as verdi_loaders
 
 app = typer.Typer(
@@ -391,6 +392,196 @@ def assemble(
     )
     qccard.write_card(run, card, Path(base))
     typer.echo(run.paths.final)
+
+
+# --------------------------------------------------------------------------
+# STAGE 1 — the canary. render -> pack -> (human decides) -> submit
+# --------------------------------------------------------------------------
+
+canary_app = typer.Typer(
+    help="STAGE 1 — canary review: render the page, open it, record the verdict.",
+    no_args_is_help=True,
+)
+app.add_typer(canary_app, name="canary")
+
+
+def _load_run_for(run_dir: Path, runs_dir: Optional[Path], styles) -> tuple[Run, Path]:
+    base = Path(runs_dir or styles.output.runs_dir)
+    try:
+        return Run.load(resolve_run(run_dir, base)), base
+    except FileNotFoundError as exc:
+        _fail(str(exc))
+
+
+def _canary_frame_names(frames: list[Path]) -> list[Path]:
+    """The three representative frames (SPEC §4.1): first, middle, most-motion.
+
+    MOST-MOTION IS NOT YET AVAILABLE — shot detection (`shots.py`) has no build
+    step assigned, so the third slot is the LAST frame, which at least samples
+    the far end of the clip. This is a stated stand-in, not a silent one: the
+    page labels it, and it changes to the most-motion shot when shots.py lands.
+    """
+    if not frames:
+        return []
+    if len(frames) <= 3:
+        return frames
+    return [frames[0], frames[len(frames) // 2], frames[-1]]
+
+
+CANARY_CAPTIONS = ("first frame", "middle frame", "last frame (stand-in for most-motion)")
+
+
+@canary_app.command("render")
+def canary_render(
+    run_dir: Path = typer.Argument(..., help="Run directory or run id"),
+    runs_dir: Optional[Path] = typer.Option(None, "--runs-dir"),
+) -> None:
+    """Generate `canary_review.html` from the run's representative frames.
+
+    Also renders the flag page when the run has scores, so an operator reviewing
+    a canary can see what the scorer already flagged.
+    """
+    styles, weights, _ = _startup()
+    run, base = _load_run_for(run_dir, runs_dir, styles)
+
+    restyled = frame_paths(run.paths.restyled_frames)
+    if not restyled:
+        _fail(
+            f"no restyled frames in {run.paths.restyled_frames}. Run "
+            "`claypipe batch` (or the canary stage) first — there is nothing to review."
+        )
+
+    scores = _load_scores(run)
+    chosen = _canary_frame_names(restyled)
+    cards = [
+        canary_page.CanaryCard(
+            name=path.name, image=path, score=scores.get(path.name), caption=caption
+        )
+        for path, caption in zip(chosen, CANARY_CAPTIONS)
+    ]
+    page = canary_page.write_canary_page(
+        run.paths.root,
+        run_id=run.run_id,
+        style=run.manifest.style,
+        backend=run.manifest.backend,
+        cards=cards,
+        prompt=_effective_prompt(run, styles.profile(run.manifest.style)),
+    )
+    run.logger.info("canary.render", path=str(page), frames=len(cards), scored=bool(scores))
+    typer.echo(page)
+
+    if scores:
+        images = {p.name: p for p in restyled}
+        selection = flag_page.select_review_frames(
+            list(scores.values()), images, weights.review
+        )
+        flag = flag_page.write_flag_page(
+            run.paths.root, run_id=run.run_id, backend=run.manifest.backend,
+            selection=selection, cfg=weights.review,
+        )
+        run.logger.info(
+            "flag.render", path=str(flag), cards=selection.shown,
+            outliers=selection.outlier_total, audit=selection.audit_total,
+        )
+        typer.echo(flag)
+    else:
+        typer.echo("(no scores.jsonl — flag page skipped; nothing has been graded)")
+
+
+def _load_scores(run: Run) -> dict:
+    """Rehydrate FrameScore objects from scores.jsonl, if the run has any."""
+    from .pipeline.score import FrameScore, Verdict, VerdictReason
+
+    if not run.paths.scores.is_file():
+        return {}
+    out = {}
+    for line in run.paths.scores.read_text().splitlines():
+        if not line.strip():
+            continue
+        rec = json.loads(line)
+        out[rec["frame"]] = FrameScore(
+            frame=rec["frame"], ssim=rec["ssim"], lpips_edges=rec["lpips_edges"],
+            identity=rec["identity"], temporal=rec["temporal"], f=rec["f"],
+            verdict=Verdict(rec["verdict"]), reason=VerdictReason(rec["reason"]),
+            targets_met=rec["targets_met"],
+        )
+    return out
+
+
+@canary_app.command("pack")
+def canary_pack(
+    run_dir: Path = typer.Argument(..., help="Run directory or run id"),
+    runs_dir: Optional[Path] = typer.Option(None, "--runs-dir"),
+    open_browser: bool = typer.Option(True, "--open/--no-open"),
+) -> None:
+    """Open the rendered canary page in the operator's browser.
+
+    `webbrowser.open()` on a local file:// URL. There is no server, and the page
+    reaches nothing off the machine (SPEC §5).
+    """
+    styles, _, _ = _startup()
+    run, _ = _load_run_for(run_dir, runs_dir, styles)
+
+    page = run.paths.root / canary_page.PAGE_NAME
+    if not page.is_file():
+        _fail(f"{page} does not exist. Run `claypipe canary render` first.")
+
+    url = page.resolve().as_uri()
+    run.logger.info("canary.pack", url=url, opened=open_browser)
+    typer.echo(url)
+    if open_browser:
+        import webbrowser
+
+        if not webbrowser.open(url):
+            typer.secho(
+                "could not open a browser automatically — open the URL above by hand",
+                fg=typer.colors.YELLOW, err=True,
+            )
+
+
+@canary_app.command("submit")
+def canary_submit(
+    run_dir: Path = typer.Argument(..., help="Run directory or run id"),
+    url: str = typer.Option(
+        ..., "--url",
+        help="The address-bar URL (or bare query string) from submitting the "
+             "canary page. Quote it — it contains & characters.",
+    ),
+    runs_dir: Optional[Path] = typer.Option(None, "--runs-dir"),
+    verbose: bool = typer.Option(False, "--verbose", "-v", help="Echo each frame's decision"),
+) -> None:
+    """Record the operator's canary decision as `canary_verdict.json`.
+
+    The page has no server to POST to, so the decision arrives as the
+    form-encoded query string the browser put in the address bar (memory.md D21).
+    """
+    styles, _, _ = _startup()
+    run, _ = _load_run_for(run_dir, runs_dir, styles)
+
+    try:
+        verdict = verdi_loaders.canary_verdict_from_form(url)
+    except ConfigError as exc:
+        _fail(str(exc))
+
+    path = verdi_loaders.write_canary_verdict(run.paths.root, verdict)
+    run.logger.info(
+        "canary.submit",
+        path=str(path), approved=verdict["approved"], decider=verdict.get("decider"),
+        frames=len(verdict.get("frames", {})),
+        reason=verdict.get("reason") or None,
+    )
+
+    approved = verdict["approved"]
+    label = {True: "APPROVED", False: "REJECTED"}.get(approved, str(approved).upper())
+    typer.echo(f"{label} by {verdict.get('decider', 'operator')} -> {path}")
+    if approved is False and verdict.get("reason"):
+        typer.echo(f"  reason: {verdict['reason']}")
+    if approved == "adjust":
+        typer.echo("  prompt_override recorded; re-shoot the canary before batching")
+    if verbose:
+        for name, entry in sorted(verdict.get("frames", {}).items()):
+            note = f" — {entry.get('note')}" if entry.get("note") else ""
+            typer.echo(f"  {name}: {entry.get('verdict')}{note}")
 
 
 @app.command()

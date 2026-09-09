@@ -276,6 +276,21 @@ def review_verdicts_from_form(body: str) -> dict:
 # Prompt override
 # --------------------------------------------------------------------------
 
+def write_canary_verdict(run_dir: Path, verdict: dict) -> Path:
+    """Write `canary_verdict.json` ATOMICALLY (temp file, then rename).
+
+    The gate polls this path. A half-written file caught mid-read would either
+    fail to parse or, worse, parse into something the operator never decided, so
+    the rename is what makes the file appear whole or not at all.
+    """
+    run_dir.mkdir(parents=True, exist_ok=True)
+    final = run_dir / CANARY_VERDICT_NAME
+    tmp = final.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(verdict, indent=2, sort_keys=True) + "\n")
+    tmp.replace(final)  # atomic within a filesystem
+    return final
+
+
 def merge_prompt_override(run_manifest_path: Path, verdict: dict) -> Path | None:
     """Record an 'adjust' verdict's revised prompt WITHOUT overwriting anything.
 
