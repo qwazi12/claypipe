@@ -125,3 +125,25 @@ firewalls:
     # ten aborted runs at $19 each costing $190.
     max_cost_usd_run: null
     max_cost_usd_project: null
+
+# --------------------------------------------------------------------------
+# Human review pages (SPEC §5). Self-contained HTML, opened via `webbrowser`,
+# no web server. These are thresholds, so they live here and not in code.
+# --------------------------------------------------------------------------
+review:
+  # Frames at or below this F land on the flag page as outliers. Defaults to
+  # the pass threshold: anything that did not auto-accept deserves human eyes.
+  outlier_f_threshold: 0.75
+  # SPEC §5: a random audit sample of frames that DID pass, so a run cannot be
+  # rubber-stamped by a scorer that is quietly mis-calibrated.
+  audit_sample_fraction: 0.02
+  # Deterministic sampling: the same run always yields the same audit set, so a
+  # review can be reproduced and a second reviewer sees the same cards.
+  audit_sample_seed: 20260909
+  # A review page beyond this many cards stops being reviewable. Hitting the cap
+  # is itself a finding: an incident note is written with the true count rather
+  # than the excess being silently dropped.
+  max_outlier_cards: 200
+  # How long `poll_canary_verdict` waits for a human before giving up.
+  canary_timeout_s: 600
+  canary_poll_s: 1.0

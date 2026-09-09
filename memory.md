@@ -1,8 +1,13 @@
 # MEMORY — ClayPipe
 
 ## Current State
-- **Steps 1, 2 and 3 of 6 are COMPLETE and green.** 99 tests pass warm;
-  65 pass / 34 skip / 0 fail on a cold clone.
+- **Steps 1-4 of 6 are COMPLETE and green.** 131 tests pass warm;
+  97 pass / 34 skip / 0 fail on a cold clone.
+- Step 4 shipped `claypipe/verdi/` — two self-contained review pages and the
+  verdict loaders. The pages are NOT yet consumed by `cli.batch`; Step 5 wires
+  them in. `cli.batch` still reads `canary_verdict.json` via
+  `retry.require_canary_approval`, which correctly BLOCKS on `approved:
+  "adjust"` (verified) since the adjust branch is Step 5 work.
 - All five cost firewalls are live and enforced: canary gate, per-frame retry
   cap, whole-run retry budget, kill switch, run + project spend caps.
 - **Steps 1 and 2 of 6 are COMPLETE and green.** Step 1: the pipeline runs
@@ -137,8 +142,13 @@
   this pipeline produces. **OPEN QUESTION for the operator:** the `logo` style
   has no character at all, so it currently cannot be scored. Decide before logo
   clips run.
-- **D13 (2026-09-09) Learned-metric model weights are warmed deliberately, never
-  downloaded during a run or a test.** `tests/conftest.py` sets
+- **D20 (2026-09-09) Learned-metric model weights are warmed deliberately, never
+  downloaded during a run or a test.**
+  *(Numbering correction, 2026-09-09: this entry was originally written as D13,
+  colliding with Operator Decision 1 which was also numbered D13 later the same
+  day. Renumbered to D20 — the later D13 keeps its number because `weights.yaml`
+  and `tests/test_score.py` already cite it. Nothing was deleted; only this
+  heading changed.)* `tests/conftest.py` sets
   `HF_HUB_OFFLINE=1`/`TRANSFORMERS_OFFLINE=1`; `score.models_are_cached()` is a
   pure predicate and the LPIPS/identity tests skip when the cache is cold.
   Verified: cold clone gives 43 passed / 33 skipped / 0 failed.
@@ -216,17 +226,56 @@
   inert unless deliberately configured. Rationale unchanged from A3: the per-run
   cap cannot see previous runs, so ten aborted runs at $19 each still cost $190.
   Surfaced rather than added silently — say the word if you want it dropped.
+- **D21 (2026-09-09) Review pages submit by FORM-ENCODED QUERY STRING, not by
+  POST to a handler.** The Step-4 brief specifies
+  `<form action="..." method="POST">` with a `format_submit.py` handler. SPEC §5
+  says, flatly, **"No web server."** A POST needs something listening; a page
+  opened from `file://` has nothing, and browsers drop `file://` POSTs on the
+  floor. Resolved by keeping a REAL html form with real `name=` attributes and
+  `method="get"` targeted at the page itself: submitting puts the entire
+  decision in the address bar, form-encoded, which the operator copies back to
+  the CLI in one line. This satisfies every stated constraint at once — no
+  server, no network, no JavaScript dependency, works in a text browser or with
+  a screen reader — and it keeps the brief's own requirement that "the Python
+  loader parses the form-encoded body, not JSON". JavaScript, when available,
+  only adds a copy button and a JSON download; persistence never depends on it.
+- **D22 (2026-09-09) `format_submit.py` was referenced but never specified.**
+  The brief says the form handler is "`claypipe format_submit.py` (see below)"
+  and there is no "below". Implemented the parsing half as
+  `verdi.loaders.parse_form_submission()`, which is the contract Step 5 needs;
+  no `format_submit.py` file was invented. The operator-facing submit COMMAND is
+  deliberately not added — the brief assigns CLI wiring to Step 5.
+- **D23 (2026-09-09) The caveat parser accepts both `- **D<n>` and `### D<n>`.**
+  The brief's acceptance test says the page "parses memory's `### D[0-9]+`
+  headings", but this file has always written decisions as `- **D<n> ...**`
+  bullets, and reformatting the whole audit trail to satisfy a parser would be
+  the tail wagging the dog. `verdi.find_decisions()` accepts either shape.
+- **D24 (2026-09-09) Review thresholds live in `weights.yaml`, not in code.**
+  The 200-card cap, the 0.75 outlier line, the 2% audit fraction, its seed and
+  the canary poll timeout are all config (Rule 25). The brief quoted 200 and 2%
+  as literals; they are defaults in `review:` now, not constants.
+- **D25 (2026-09-09) `Scorer` and `RetryController` are NOT yet consumed by
+  `cli.batch`.** Step 3 built them; Step 5 wires them in. Until then a batch run
+  produces no `scores.jsonl`, and any review page for such a run would otherwise
+  imply a clean sweep when nothing was actually measured. The canary page
+  therefore renders an explicit Caveats block quoting this entry whenever the
+  run's backend is `dummy` or its scores are absent, so an operator can never
+  read an unscored page as a pass.
 
 ## Pending / Next
 - ~~A4 — Drive folder ID~~ CLOSED as out of scope by operator direction, see D8.
   Cross-repo integration deferred; ClayPipe's output dir is the contract surface.
 - Step 2 — scoring module. DONE, green. D9 and D10 CLOSED by Decisions 1 and 2.
 - Step 3 — retry + firewalls. DONE, green.
+- Step 4 — human gates. DONE, green. Pages + loaders shipped, not yet wired.
 - D15 open (TF flags real motion), D16 recorded, D18 open (targets_missed retry
   path — reseed or strength nudge?), D19 open (keep the project cap?). None of
   these blocks step 4.
-- Step 4 — human gate HTML pages. CLEARED TO BUILD. Note it must WRITE the
-  `canary_verdict.json` that step 3 now reads, and `review_verdicts.json`.
+- Step 5 — FalBackend. CLEARED TO BUILD. It also owns the wiring Step 4
+  deliberately left undone: `poll_canary_verdict` before authorising any frame
+  call, `merge_prompt_override` on an "adjust" verdict, `Scorer` +
+  `RetryController` into `cli.batch` (D25), and an operator-facing submit
+  command that feeds `parse_form_submission` (D22).
 - D12 open: how should styles with no character (e.g. `logo`) score ID?
 - Step 4 — human gate HTML pages; Step 5 — FalBackend; Step 6 — CLI polish + README.
 - A2 — Flux Kontext vs SDXL+ControlNet stays deferred until after the first real
@@ -236,6 +285,20 @@
 - RUNBOOK.md / CONFIG.md (Rule 33) not written yet — due with step 6.
 
 ## Log (append-only, newest first)
+
+### 2026-09-09 — Step 4 shipped: human gate pages + verdict loaders
+- New package `claypipe/verdi/`: `canary_page.py`, `flag_page.py`, `loaders.py`,
+  plus shared HTML primitives in `__init__.py`. `claypipe/review/` was never
+  created, per the brief reserving that path.
+- Pages are ONE file with ZERO external references — verified by walking every
+  src/href/action in the rendered output, not just by intent. 21,895 bytes
+  (3 inline PNGs) and 62,854 bytes (17 inline PNGs).
+- Round-trip proven byte-identical: address-bar URL -> `canary_verdict_from_form`
+  -> `canary_verdict.json` -> `read_canary_verdict` -> same dict, empty diff.
+- Fixed a numbering defect inherited from the previous session: D13 had been
+  used twice. The earlier entry is now D20 (see its note); the later D13 keeps
+  its number because `weights.yaml` and `tests/test_score.py` already cite it.
+- 32 new tests; 131 total green, 97 pass / 34 skip cold. Step 5 NOT started.
 
 ### 2026-09-09 — Step 3 shipped: retry policy + five cost firewalls
 - Built `pipeline/retry.py`: `RetryController` (per-frame cap, whole-run budget,

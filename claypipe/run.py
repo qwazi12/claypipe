@@ -53,6 +53,10 @@ class RunManifest(BaseModel):
     fps: int
     backend: str
     reference_images: list[str] = Field(default_factory=list)
+    # Set by verdi.loaders.merge_prompt_override when a canary comes back
+    # "adjust". Points AT the override file; the original style prompt in
+    # styles.yaml is never touched.
+    prompt_override_source: str | None = None
 
 
 @dataclass(frozen=True)

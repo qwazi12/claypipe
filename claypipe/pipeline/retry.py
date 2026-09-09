@@ -68,23 +68,24 @@ class CanaryGateError(RunHalted):
 
 
 def write_incident(
-    paths: RunPaths, breach: Breach, detail: dict, logger: RunLogger | None = None
+    paths: RunPaths, breach: Breach | str, detail: dict, logger: RunLogger | None = None
 ) -> Path:
     """An incident note is the whole point of a pause: a human must be able to
     see what tripped, on what evidence, without re-running anything."""
     directory = paths.root / INCIDENTS_DIR
     directory.mkdir(parents=True, exist_ok=True)
+    label = breach.value if isinstance(breach, Breach) else str(breach)
     note = {
         "schema_version": 1,
         "written_at": utc_now(),
-        "breach": breach.value,
+        "breach": label,
         "run_dir": str(paths.root),
         **detail,
     }
-    path = directory / f"{utc_now().replace(':', '').replace('.', '')}-{breach.value}.json"
+    path = directory / f"{utc_now().replace(':', '').replace('.', '')}-{label}.json"
     path.write_text(json.dumps(note, indent=2) + "\n")
     if logger is not None:
-        logger.error("firewall.breach", breach=breach.value, incident=str(path), **detail)
+        logger.error("firewall.breach", breach=label, incident=str(path), **detail)
     return path
 
 

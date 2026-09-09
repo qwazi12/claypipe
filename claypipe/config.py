@@ -226,6 +226,17 @@ class FirewallConfig(BaseModel):
     cost: CostConfig
 
 
+class ReviewConfig(BaseModel):
+    model_config = {"extra": "forbid"}
+
+    outlier_f_threshold: float = Field(ge=0.0, le=1.0)
+    audit_sample_fraction: float = Field(ge=0.0, le=1.0)
+    audit_sample_seed: int
+    max_outlier_cards: int = Field(gt=0)
+    canary_timeout_s: int = Field(gt=0)
+    canary_poll_s: float = Field(gt=0.0)
+
+
 class WeightsConfig(BaseModel):
     model_config = {"extra": "forbid"}
 
@@ -237,6 +248,7 @@ class WeightsConfig(BaseModel):
     temporal: TemporalConfig
     models: ModelsConfig
     firewalls: FirewallConfig
+    review: ReviewConfig
 
 
 def _load_yaml(path: Path) -> dict:
