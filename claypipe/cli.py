@@ -19,8 +19,9 @@ from .pipeline import assemble as assemble_stage
 from .pipeline import qccard
 from .pipeline.extract import count_frames, extract_audio, extract_frames
 from .pipeline.restyle import get_backend, restyle_frames
-from .pipeline.retry import RunHalted, SpendLedger, require_canary_approval
+from .pipeline.retry import RunHalted, SpendLedger
 from .run import Run, resolve_run
+from .verdi import loaders as verdi_loaders
 
 app = typer.Typer(
     add_completion=False,
@@ -100,6 +101,94 @@ def intake(
     typer.echo(run.paths.root)
 
 
+def _require_canary(run: Run, weights, *, wait: bool) -> dict:
+    """STAGE 1 GATE. Nothing downstream of this line may spend money.
+
+    Three outcomes, and only one of them continues:
+      approved: true     -> proceed
+      approved: false    -> stop, surfacing the operator's reason verbatim
+      approved: "adjust" -> record the revised prompt beside the run and stop,
+                            because an adjusted prompt means the canary itself
+                            has to be re-shot before a batch is worth paying for
+    """
+    path = run.paths.root / verdi_loaders.CANARY_VERDICT_NAME
+    try:
+        if wait:
+            verdict = verdi_loaders.poll_canary_verdict(
+                path,
+                timeout_s=weights.review.canary_timeout_s,
+                poll_s=weights.review.canary_poll_s,
+            )
+        else:
+            verdict = verdi_loaders.read_canary_verdict(path)
+    except verdi_loaders.NoCanaryVerdict:
+        run.logger.error("batch.blocked", breach="canary_missing")
+        _fail(
+            f"canary gate: {verdi_loaders.CANARY_VERDICT_NAME} not found in "
+            f"{run.paths.root}. Batch cannot start before a human has reviewed "
+            "the canary frames. Run `claypipe canary render` then "
+            "`claypipe canary pack`, decide, and submit with "
+            "`claypipe canary submit`."
+        )
+    except verdi_loaders.CanaryTimeout as exc:
+        run.logger.error("batch.blocked", breach="canary_timeout")
+        _fail(f"canary gate: {exc}")
+    except ConfigError as exc:
+        run.logger.error("batch.blocked", breach="canary_unreadable")
+        _fail(f"canary gate: {exc}")
+
+    if verdict["approved"] is False:
+        reason = verdict.get("reason", "") or "(no reason given)"
+        run.logger.error("batch.blocked", breach="canary_not_approved", reason=reason)
+        _fail(
+            f"canary gate: the canary was REJECTED by "
+            f"{verdict.get('decider', 'the operator')}.\nReason: {reason}"
+        )
+
+    if verdict["approved"] == "adjust":
+        written = verdi_loaders.merge_prompt_override(run.paths.manifest, verdict)
+        run.logger.warn(
+            "batch.blocked",
+            breach="canary_adjust",
+            prompt_override=str(written) if written else None,
+        )
+        _fail(
+            "canary gate: the canary came back ADJUST, so the prompt changed and "
+            "the canary has to be re-shot before a batch is worth paying for.\n"
+            f"The revised prompt was written to {written}, and run.json now "
+            "points at it. Re-run the canary, then batch."
+        )
+
+    run.logger.info(
+        "batch.canary.approved",
+        decider=verdict.get("decider"),
+        decided_at=verdict.get("decided_at"),
+    )
+    return verdict
+
+
+def _effective_prompt(run: Run, profile) -> str:
+    """The style prompt, unless this run carries an operator override.
+
+    The override lives beside the run and the manifest only POINTS at it, so a
+    per-run adjustment can never leak back into styles.yaml (memory.md D12/D8
+    discipline: one canonical source, per-run deviations recorded separately).
+    """
+    source = run.manifest.prompt_override_source
+    if not source:
+        return profile.prompt
+    path = run.paths.root / source
+    if not path.is_file():
+        _fail(
+            f"run.json points at prompt override {source!r} but "
+            f"{path} is missing. Refusing to silently fall back to the style "
+            "prompt — that would spend money on a prompt nobody approved."
+        )
+    override = path.read_text().strip()
+    run.logger.info("batch.prompt_override", source=source, chars=len(override))
+    return override
+
+
 @app.command()
 def batch(
     run_dir: Path = typer.Argument(..., help="Run directory or run id"),
@@ -108,6 +197,12 @@ def batch(
         None, "--max-cost-usd",
         help="Hard cap on this run's cumulative API spend. Halts before the "
              "call that would breach it.",
+    ),
+    wait_for_canary: bool = typer.Option(
+        False, "--wait-for-canary",
+        help="Block and poll for canary_verdict.json instead of failing "
+             "immediately when it is absent. Useful when the operator is "
+             "reviewing the page in another window.",
     ),
 ) -> None:
     """STAGE 2 — extract frames + audio, then restyle every frame.
@@ -123,14 +218,11 @@ def batch(
         _fail(str(exc))
 
     # FIREWALL 1: no approved canary verdict -> no spend. Checked before the
-    # backend is even constructed.
-    try:
-        require_canary_approval(run.paths, run.logger)
-    except RunHalted as exc:
-        run.logger.error("batch.blocked", breach=exc.breach.value, error=str(exc))
-        _fail(str(exc))
+    # backend is even constructed, and long before the ledger authorises a call.
+    verdict = _require_canary(run, weights, wait=wait_for_canary)
 
     profile = styles.profile(run.manifest.style)
+    prompt = _effective_prompt(run, profile)
     try:
         backend = get_backend(run.manifest.backend)
     except (NotImplementedError, ValueError) as exc:
@@ -152,7 +244,7 @@ def batch(
             backend=backend,
             source_dir=run.paths.source_frames,
             out_dir=run.paths.restyled_frames,
-            prompt=profile.prompt,
+            prompt=prompt,
             strength=profile.strength,
             logger=run.logger,
             ledger=ledger,

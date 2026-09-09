@@ -310,6 +310,18 @@
 
 ## Log (append-only, newest first)
 
+### 2026-09-09 — Step 5 commit 1: canary gate wired into cli.batch
+- `cli.batch` now consults `verdi.loaders` instead of `retry.require_canary_approval`.
+  Three outcomes: true proceeds, false stops with the operator's reason verbatim,
+  "adjust" records the revised prompt beside the run and STOPS (an adjusted
+  prompt means the canary must be re-shot before a batch is worth paying for).
+- `--wait-for-canary` opts into polling; default fails fast so a missing verdict
+  is a refusal, not a ten-minute hang.
+- The override prompt is now actually USED on the next run, and a dangling
+  override pointer fails loudly rather than falling back to styles.yaml — a
+  silent fallback would spend money on a prompt nobody approved.
+- 7 new tests, 138 green.
+
 ### 2026-09-09 — Step 4 shipped: human gate pages + verdict loaders
 - New package `claypipe/verdi/`: `canary_page.py`, `flag_page.py`, `loaders.py`,
   plus shared HTML primitives in `__init__.py`. `claypipe/review/` was never
