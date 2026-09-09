@@ -83,7 +83,7 @@
   was never encrypted or obfuscated, contrary to the brief's §14 characterisation.
   Nothing was stored, and no ID was ever invented.)
 - **D9 (2026-09-09) FINDING — the composite F cannot gate identity or temporal
-  drift. OPEN, needs operator decision.** With the specified weights
+  drift. CLOSED 2026-09-09 by Decision 1, see D13.** With the specified weights
   (0.40/0.25/0.20/0.15), take a frame perfect in every other respect and drive
   ONE component to its worst possible value:
   | component at worst | F | verdict |
@@ -105,7 +105,7 @@
   missed component target as a flag/retry trigger independent of F;
   (b) re-weight; (c) redefine PASS as "F >= 0.75 AND all component targets met".
 - **D10 (2026-09-09) FINDING — the TF target of 0.80 is nearly unbreachable.
-  OPEN, needs operator decision.** TF is `1 - mean(|flow-warped prev - curr|)/255`
+  CLOSED 2026-09-09 by Decision 2, see D14.** TF is `1 - mean(|flow-warped prev - curr|)/255`
   over the WHOLE frame, so it is dominated by the unchanged majority of the
   frame and saturates near 1. Breaching TF < 0.80 requires consecutive frames
   differing by an average of >51 grey levels after motion compensation, which is
@@ -141,14 +141,52 @@
   macOS note: the first warm-up needs `SSL_CERT_FILE=$(python -c "import certifi;
   print(certifi.where())")` — the python.org framework build ships no CA bundle
   and the download fails with CERTIFICATE_VERIFY_FAILED without it.
+- **D13 (2026-09-09, OPERATOR DECISION 1) PASS = `F >= 0.75` AND all four
+  component targets met.** Closes D9. `weights.yaml` gains
+  `thresholds.require_component_targets: true`; the formula is untouched.
+  Gate order, as implemented in `score.classify()` and documented in
+  `weights.yaml`:
+    0. FAIL is a composite-only veto, settled FIRST: `F < borderline` -> FAIL.
+       A component miss must never be what FAILs a frame.
+    1. Component targets next. Any miss -> BORDERLINE (`targets_missed`).
+    2. Composite F last. `borderline <= F < pass` -> BORDERLINE
+       (`composite_borderline`).
+  The operator's brief said "targets first, then F"; taken literally that would
+  make a target miss at F=0.2 a BORDERLINE, contradicting the F<0.65 -> FAIL
+  band. Resolved as above — targets first among the NON-FAIL outcomes — which
+  satisfies both statements. A test caught the ordering error before it shipped
+  (`test_decision1_component_miss_alone_is_never_fail`).
+  `FrameScore` now carries a `reason` (`VerdictReason`) so retry.py can branch
+  on WHY, not just on the verdict.
+- **D14 (2026-09-09, OPERATOR DECISION 2) `targets.tf_min` raised 0.80 -> 0.95.**
+  Closes D10. Pure config; no code touched, metric unchanged.
+- **D15 (2026-09-09) FINDING — tf_min=0.95 flags legitimate fast motion, not
+  just flicker. OPEN, not blocking.** Measured: real motion 0.932, severe
+  shimmer 0.916 — **0.016 apart**. No single threshold separates them, so any
+  target that catches the flicker also catches genuine fast action. Consequence:
+  action-heavy shots will generate human-review load at Stage 3. Decision 2 was
+  applied verbatim as directed; this records the cost rather than absorbing it.
+  Pinned by `test_finding_d15_tf_target_also_flags_legitimate_fast_motion`.
+  If review load proves excessive, the lever is a motion-aware TF (e.g. mask
+  pixels where flow magnitude is high) — a code change, so operator decision.
+- **D16 (2026-09-09) Two fixtures beyond `structure_destroyed` moved
+  PASS -> BORDERLINE under Decision 1, and one under Decision 2.** The operator
+  brief predicted only `structure_destroyed` would move and that "all other
+  previously-passing fixtures stay PASS". Actual: `low_light` (SSIM 0.521 vs
+  0.72), `gaussian_blurred` (ID 0.845 vs 0.85 — misses by 0.005), and
+  `high_motion` (TF 0.932 vs the new 0.95) also moved. All three were ALREADY
+  missing a component target before Decision 1; the decision simply made that
+  consequential, which is what it was for. Not a defect — but the acceptance
+  bullet as written could not be met, so it is recorded rather than glossed.
+  Note `gaussian_blurred` sits 0.005 from its target: that fixture is knife-edge
+  and its verdict may flip on a library upgrade.
 
 ## Pending / Next
 - ~~A4 — Drive folder ID~~ CLOSED as out of scope by operator direction, see D8.
   Cross-repo integration deferred; ClayPipe's output dir is the contract surface.
-- Step 2 — scoring module. DONE, green. Two findings open: D9, D10.
-- **BLOCKING STEP 3: resolve D9 and D10.** The retry policy branches on
-  PASS/BORDERLINE/FAIL, and D9 says those verdicts under-trigger for two of the
-  five failure modes. Building retry on top of that would bake the gap in.
+- Step 2 — scoring module. DONE, green. D9 and D10 CLOSED by Decisions 1 and 2.
+- Step 3 — retry + firewalls. IN PROGRESS, cleared to build.
+- D15 open (TF flags real motion) and D16 recorded — neither blocks step 3.
 - D12 open: how should styles with no character (e.g. `logo`) score ID?
 - Step 3 — retry + cost firewalls, incl. A3 cumulative PROJECT-level spend cap
   (the per-run `--max-cost-usd` alone does not stop ten aborted runs costing 10×).
@@ -160,6 +198,17 @@
 - RUNBOOK.md / CONFIG.md (Rule 33) not written yet — due with step 6.
 
 ## Log (append-only, newest first)
+
+### 2026-09-09 — Decisions 1 and 2 applied; D9/D10 closed
+- `weights.yaml`: `require_component_targets: true`, `tf_min` 0.80 -> 0.95, with
+  the gate order documented in the file so it is unambiguous from config alone.
+- `score.classify()` returns `(Verdict, VerdictReason)`; `FrameScore` carries
+  `reason` and `missed_targets`.
+- Re-swept all 11 fixtures. `structure_destroyed` PASS -> BORDERLINE as intended;
+  `low_light`, `gaussian_blurred` and `high_motion` also moved (D16).
+- New finding D15: at tf_min=0.95, real motion (0.932) is flagged alongside
+  flicker (0.916). Recorded, not absorbed.
+- 80 tests green.
 
 ### 2026-09-09 — Step 2 shipped: scoring module + 11 fixture cases
 - Built `pipeline/score.py`: SSIM, LPIPS-on-Canny-edges, open_clip identity,

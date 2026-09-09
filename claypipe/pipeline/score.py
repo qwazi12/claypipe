@@ -47,6 +47,20 @@ class Verdict(str, Enum):
     FAIL = "FAIL"
 
 
+class VerdictReason(str, Enum):
+    """WHY a frame landed where it did.
+
+    The retry policy branches on this, not on the verdict alone: a frame that is
+    BORDERLINE because a component target was missed and one that is BORDERLINE
+    because the composite dipped are the same verdict but different diagnoses.
+    """
+
+    ACCEPTED = "accepted"
+    TARGETS_MISSED = "targets_missed"          # Decision 1 route to BORDERLINE
+    COMPOSITE_BORDERLINE = "composite_borderline"
+    COMPOSITE_FAIL = "composite_fail"
+
+
 @dataclass(frozen=True)
 class FrameScore:
     """One frame's scores, plus why it landed where it did."""
@@ -58,13 +72,21 @@ class FrameScore:
     temporal: float
     f: float
     verdict: Verdict
-    # Per-component target checks (SPEC §3). Diagnostic: a FAIL is far more
-    # actionable when it says WHICH component missed.
+    reason: VerdictReason
+    # Per-component target checks (SPEC §3). Under Decision 1 these GATE the
+    # verdict; they also say WHICH component missed, which is what makes a
+    # non-PASS actionable.
     targets_met: dict[str, bool]
+
+    @property
+    def missed_targets(self) -> list[str]:
+        return sorted(k for k, ok in self.targets_met.items() if not ok)
 
     def to_dict(self) -> dict:
         d = asdict(self)
         d["verdict"] = self.verdict.value
+        d["reason"] = self.reason.value
+        d["missed_targets"] = self.missed_targets
         return d
 
 
@@ -342,13 +364,34 @@ def composite_f(
     return float(np.clip(value, 0.0, 1.0))
 
 
-def classify(f: float, cfg: WeightsConfig) -> Verdict:
+def classify(
+    f: float, cfg: WeightsConfig, targets_met: dict[str, bool] | None = None
+) -> tuple[Verdict, VerdictReason]:
+    """The two-step gate. Order is defined in weights.yaml and mirrored here.
+
+    0. FAIL is a composite-only veto: F < `borderline` -> FAIL, decided first,
+       because a component miss must never be the thing that FAILs a frame.
+    1. Component targets next. Any miss -> BORDERLINE (targets_missed). When a
+       frame both misses a target and sits below the pass line, the missed
+       target is reported, being the more actionable diagnosis.
+    2. Composite F last. F < `pass` -> BORDERLINE (composite_borderline).
+
+    `targets_met` is optional so the composite bands stay testable on their own;
+    when it is omitted, only step 2 applies.
+    """
     t = cfg.thresholds
-    if f >= t.pass_:
-        return Verdict.PASS
-    if f >= t.borderline:
-        return Verdict.BORDERLINE
-    return Verdict.FAIL
+    # FAIL is a composite-only veto and takes precedence: a component miss can
+    # never be the thing that FAILs a frame, so the sub-borderline case is
+    # settled before the target check runs.
+    if f < t.borderline:
+        return Verdict.FAIL, VerdictReason.COMPOSITE_FAIL
+    # Targets next, ahead of the F band. A missed target is the more actionable
+    # diagnosis, so it wins the reason when both are true.
+    if t.require_component_targets and targets_met is not None and not all(targets_met.values()):
+        return Verdict.BORDERLINE, VerdictReason.TARGETS_MISSED
+    if f < t.pass_:
+        return Verdict.BORDERLINE, VerdictReason.COMPOSITE_BORDERLINE
+    return Verdict.PASS, VerdictReason.ACCEPTED
 
 
 def check_targets(
@@ -401,6 +444,11 @@ class Scorer:
             ssim=ssim, lpips_edges=lpips_edges, identity=identity,
             temporal=temporal, cfg=self.cfg,
         )
+        targets_met = check_targets(
+            ssim=ssim, lpips_edges=lpips_edges, identity=identity,
+            temporal=temporal, cfg=self.cfg,
+        )
+        verdict, reason = classify(f, self.cfg, targets_met)
         return FrameScore(
             frame=frame,
             ssim=ssim,
@@ -408,11 +456,9 @@ class Scorer:
             identity=identity,
             temporal=temporal,
             f=f,
-            verdict=classify(f, self.cfg),
-            targets_met=check_targets(
-                ssim=ssim, lpips_edges=lpips_edges, identity=identity,
-                temporal=temporal, cfg=self.cfg,
-            ),
+            verdict=verdict,
+            reason=reason,
+            targets_met=targets_met,
         )
 
 

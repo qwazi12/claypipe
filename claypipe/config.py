@@ -125,6 +125,9 @@ class ScoreThresholds(BaseModel):
 
     pass_: float = Field(alias="pass", ge=0.0, le=1.0)
     borderline: float = Field(ge=0.0, le=1.0)
+    # Decision 1 (2026-09-09): PASS requires F >= pass AND every component
+    # target met. See the gate-order comment in weights.yaml.
+    require_component_targets: bool = True
 
     @model_validator(mode="after")
     def _ordered(self) -> "ScoreThresholds":

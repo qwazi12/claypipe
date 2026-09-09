@@ -14,18 +14,53 @@ weights:
   id: 0.20
   tf: 0.15
 
-# Per-component targets (SPEC §3). Diagnostic: they explain WHY a frame failed.
+# Per-component targets (SPEC §3). These are GATING, not merely diagnostic —
+# see thresholds.require_component_targets below.
 targets:
   ssim_min: 0.72
   lpips_edges_max: 0.35
   id_min: 0.85
-  tf_min: 0.80
+  # DECISION 2 (2026-09-09), memory.md D14: raised 0.80 -> 0.95.
+  # TF is a whole-frame mean and saturates near 1, so 0.80 was unbreachable:
+  # measured static 0.997, real motion 0.932, severe shimmer 0.916 — every one
+  # of them "met" the old target, including the shimmer it existed to catch.
+  # At 0.95 the ordering static > real-motion > flicker becomes expressive.
+  # The METRIC is unchanged; only this number moved.
+  tf_min: 0.95
 
 # Composite verdict bands (SPEC §3).
+#
+# DECISION 1 (2026-09-09), memory.md D13 — PASS now requires BOTH:
+#     F >= pass  AND  every component target above is met.
+#
+# THE GATE RUNS IN THIS ORDER, and the order is the whole point:
+#
+#   0. FAIL IS A COMPOSITE-ONLY VETO, settled first: F < borderline -> FAIL
+#      (reason: composite_fail) -> retry with a new seed, max 2, then human.
+#      A component miss must never be the thing that FAILs a frame, so this
+#      case is decided before the target check runs.
+#   1. COMPONENT TARGETS next, one by one. Any miss -> BORDERLINE
+#      (reason: targets_missed) -> one retry at strength -0.10, then the
+#      human queue. When a frame both misses a target and sits below the pass
+#      line, targets_missed is the reason reported: it is the more actionable
+#      diagnosis of the two.
+#   2. COMPOSITE F last. borderline <= F < pass -> BORDERLINE
+#      (reason: composite_borderline).
+#
+# So the ONLY route to FAIL is the composite. A missed component target can
+# push a frame to BORDERLINE but never past it.
+#
+# Why: without this, no single component at its worst value could pull F out
+# of PASS except SSIM (ID=0 -> F=0.80, TF=0 -> F=0.85, LPIPS=1 -> F=0.75), so
+# failure modes 2 and 3 were not gated at all. structure_destroyed scored PASS
+# at F=0.814 with ID=0.653 against a 0.85 target. The formula is untouched.
 thresholds:
-  pass: 0.75        # F >= pass          -> auto-accept
+  pass: 0.75        # F >= pass AND all targets met -> auto-accept
   borderline: 0.65  # borderline <= F < pass -> retry once at strength -0.10
-                    # F < borderline     -> retry with a new seed
+                    # F < borderline         -> retry with a new seed
+  # Decision 1. Setting this false restores pre-2026-09-09 behaviour, where the
+  # composite alone decided and component targets were advisory.
+  require_component_targets: true
 
 # Canny edge extraction. LPIPS is measured on THESE maps, never on raw colour:
 # a correct restyle SHOULD change colour and texture, and only geometry is

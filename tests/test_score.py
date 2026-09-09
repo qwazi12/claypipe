@@ -80,12 +80,25 @@ TEMPORAL_BANDS: dict[str, tuple[float, float]] = {
     "high_motion":  (0.900, 0.960),
     "flicker_pair": (0.880, 0.945),
 }
+# Verdicts under DECISION 1 (PASS = F >= 0.75 AND all component targets met)
+# and DECISION 2 (tf_min 0.80 -> 0.95). Three fixtures moved PASS -> BORDERLINE
+# when Decision 1 landed; each is annotated with which target it misses.
 EXPECTED_VERDICT = {
-    "identical": S.Verdict.PASS, "recolored_only": S.Verdict.PASS,
-    "edge_shifted": S.Verdict.PASS, "gaussian_blurred": S.Verdict.PASS,
-    "face_swapped": S.Verdict.PASS, "low_light": S.Verdict.PASS,
-    "neumorphic": S.Verdict.PASS, "structure_destroyed": S.Verdict.PASS,
+    "identical": S.Verdict.PASS,
+    "recolored_only": S.Verdict.PASS,
+    "edge_shifted": S.Verdict.PASS,
+    "gaussian_blurred": S.Verdict.BORDERLINE,     # ID 0.845 vs 0.85 target
+    "face_swapped": S.Verdict.PASS,
+    "low_light": S.Verdict.BORDERLINE,            # SSIM 0.521 vs 0.72 target
+    "neumorphic": S.Verdict.PASS,
+    "structure_destroyed": S.Verdict.BORDERLINE,  # ID 0.653 vs 0.85 target
     "wrong_scene": S.Verdict.FAIL,
+}
+EXPECTED_MISSED_TARGETS = {
+    "gaussian_blurred": ["id"],
+    "low_light": ["ssim"],
+    "structure_destroyed": ["id"],
+    "wrong_scene": ["id", "lpips_edges", "ssim"],
 }
 # fmt: on
 
@@ -142,6 +155,7 @@ def test_verdict_across_fixture_set(case: str, scorer) -> None:
         f"{case}: F={got.f:.3f} -> {got.verdict.value}, expected "
         f"{EXPECTED_VERDICT[case].value}"
     )
+    assert got.missed_targets == EXPECTED_MISSED_TARGETS.get(case, [])
 
 
 # --------------------------------------------------------------------------
@@ -283,19 +297,22 @@ def test_composite_reads_weights_from_config_not_code(cfg) -> None:
     assert f == pytest.approx(0.42)
 
 
+ALL_TARGETS_MET = {"ssim": True, "lpips_edges": True, "id": True, "tf": True}
+
+
 def test_classify_covers_all_three_bands(cfg) -> None:
-    assert S.classify(0.95, cfg) is S.Verdict.PASS
-    assert S.classify(0.70, cfg) is S.Verdict.BORDERLINE
-    assert S.classify(0.10, cfg) is S.Verdict.FAIL
+    assert S.classify(0.95, cfg, ALL_TARGETS_MET)[0] is S.Verdict.PASS
+    assert S.classify(0.70, cfg, ALL_TARGETS_MET)[0] is S.Verdict.BORDERLINE
+    assert S.classify(0.10, cfg, ALL_TARGETS_MET)[0] is S.Verdict.FAIL
 
 
 def test_classify_boundaries_are_inclusive_at_the_bottom(cfg) -> None:
     """PASS at exactly 0.75, BORDERLINE at exactly 0.65 — per SPEC §3 bands."""
     p, b = cfg.thresholds.pass_, cfg.thresholds.borderline
-    assert S.classify(p, cfg) is S.Verdict.PASS
-    assert S.classify(p - 1e-9, cfg) is S.Verdict.BORDERLINE
-    assert S.classify(b, cfg) is S.Verdict.BORDERLINE
-    assert S.classify(b - 1e-9, cfg) is S.Verdict.FAIL
+    assert S.classify(p, cfg, ALL_TARGETS_MET)[0] is S.Verdict.PASS
+    assert S.classify(p - 1e-9, cfg, ALL_TARGETS_MET)[0] is S.Verdict.BORDERLINE
+    assert S.classify(b, cfg, ALL_TARGETS_MET)[0] is S.Verdict.BORDERLINE
+    assert S.classify(b - 1e-9, cfg, ALL_TARGETS_MET)[0] is S.Verdict.FAIL
 
 
 def test_targets_report_which_component_missed(cfg) -> None:
@@ -311,62 +328,132 @@ def test_frames_of_different_sizes_are_rejected(cfg) -> None:
 
 
 # --------------------------------------------------------------------------
-# FINDINGS — these pin known weaknesses in the SPECIFIED formula.
-# They assert what the system currently DOES, not what it should do. If the
-# formula or thresholds are ever revised, these fail and force the change to be
-# a conscious one. See memory.md D9 and D10.
+# DECISION 1 (memory.md D13) — PASS = F >= 0.75 AND all component targets met.
+# DECISION 2 (memory.md D14) — tf_min raised 0.80 -> 0.95.
+# These tests pin the decided behaviour by name, so a later step cannot drift
+# away from it silently.
 # --------------------------------------------------------------------------
 
-def test_finding_identity_or_temporal_alone_cannot_drop_below_pass(cfg) -> None:
-    """FINDING (D9): with weights 0.40/0.25/0.20/0.15, no single component at
-    its worst value can pull F out of the PASS band except SSIM.
+def test_decision1_component_miss_downgrades_pass_to_borderline(cfg) -> None:
+    """A frame above the pass line that misses one target is BORDERLINE."""
+    missed_id = {**ALL_TARGETS_MET, "id": False}
+    verdict, reason = S.classify(0.814, cfg, missed_id)
+    assert verdict is S.Verdict.BORDERLINE
+    assert reason is S.VerdictReason.TARGETS_MISSED
 
-    So failure modes 2 (flicker) and 3 (identity drift) are NOT gated by the
-    composite. They are visible only through `targets_met`. This test documents
-    that gap; it is not an endorsement of it.
+
+def test_decision1_component_miss_alone_is_never_fail(cfg) -> None:
+    """Gate order: targets can push a frame to BORDERLINE, never past it.
+
+    The only route to FAIL is the composite. A frame that misses every target
+    but sits above the borderline line stays BORDERLINE.
     """
+    all_missed = {k: False for k in ALL_TARGETS_MET}
+    verdict, reason = S.classify(cfg.thresholds.borderline, cfg, all_missed)
+    assert verdict is S.Verdict.BORDERLINE
+    assert reason is S.VerdictReason.TARGETS_MISSED
+
+    # ...and below the borderline line the COMPOSITE is what fails it.
+    verdict, reason = S.classify(cfg.thresholds.borderline - 1e-9, cfg, all_missed)
+    assert verdict is S.Verdict.FAIL
+    assert reason is S.VerdictReason.COMPOSITE_FAIL
+
+
+def test_decision1_composite_alone_still_cannot_gate_identity_or_temporal(cfg) -> None:
+    """Why Decision 1 was needed, kept as executable documentation.
+
+    With component targets switched off, driving any single component to its
+    worst value leaves F inside PASS except for SSIM. That gap is exactly what
+    Decision 1 closes.
+    """
+    composite_only = cfg.model_copy(
+        update={
+            "thresholds": cfg.thresholds.model_copy(
+                update={"require_component_targets": False}
+            )
+        }
+    )
     perfect = dict(ssim=1.0, lpips_edges=0.0, identity=1.0, temporal=1.0)
+    all_missed = {k: False for k in ALL_TARGETS_MET}
 
-    id_dead = S.composite_f(**{**perfect, "identity": 0.0}, cfg=cfg)
-    tf_dead = S.composite_f(**{**perfect, "temporal": 0.0}, cfg=cfg)
-    lpips_dead = S.composite_f(**{**perfect, "lpips_edges": 1.0}, cfg=cfg)
+    for component, worst, expected_f in [
+        ("identity", 0.0, 0.80),
+        ("temporal", 0.0, 0.85),
+        ("lpips_edges", 1.0, 0.75),
+    ]:
+        f = S.composite_f(**{**perfect, component: worst}, cfg=cfg)
+        assert f == pytest.approx(expected_f)
+        assert S.classify(f, composite_only, all_missed)[0] is S.Verdict.PASS
+        # Under Decision 1 the same frame is caught.
+        assert S.classify(f, cfg, all_missed)[0] is S.Verdict.BORDERLINE
+
     ssim_dead = S.composite_f(**{**perfect, "ssim": 0.0}, cfg=cfg)
-
-    assert S.classify(id_dead, cfg) is S.Verdict.PASS and id_dead == pytest.approx(0.80)
-    assert S.classify(tf_dead, cfg) is S.Verdict.PASS and tf_dead == pytest.approx(0.85)
-    assert S.classify(lpips_dead, cfg) is S.Verdict.PASS and lpips_dead == pytest.approx(0.75)
-    assert S.classify(ssim_dead, cfg) is S.Verdict.FAIL and ssim_dead == pytest.approx(0.60)
+    assert ssim_dead == pytest.approx(0.60)
+    assert S.classify(ssim_dead, composite_only, all_missed)[0] is S.Verdict.FAIL
 
 
 @requires_models
-def test_finding_per_component_targets_catch_what_the_composite_misses(scorer, cfg) -> None:
-    """FINDING (D9), shown on a real fixture rather than in the abstract.
+def test_decision1_structure_destroyed_is_borderline_not_pass(scorer, cfg) -> None:
+    """The fixture that motivated Decision 1, pinned end to end.
 
-    `structure_destroyed` has visibly mangled geometry and a character the
-    embedder no longer recognises (ID ~0.65 against a 0.85 target), yet the
-    composite scores it a comfortable PASS.
+    Mangled geometry and a character the embedder no longer recognises
+    (ID ~0.65 against a 0.85 target). It scored a comfortable PASS at F=0.814
+    under the composite alone; it is BORDERLINE now.
     """
     src, res = pair("structure_destroyed")
     got = scorer.score_frame(
         frame="structure_destroyed", source=src, restyled=res,
         references=[src], previous_restyled=None,
     )
-    assert got.verdict is S.Verdict.PASS
+    assert got.f >= cfg.thresholds.pass_, "F itself is still above the pass line"
     assert got.identity < cfg.targets.id_min
-    assert got.targets_met["id"] is False, "the target check is the only thing that catches it"
+    assert got.verdict is S.Verdict.BORDERLINE
+    assert got.reason is S.VerdictReason.TARGETS_MISSED
+    assert got.missed_targets == ["id"]
 
 
-def test_finding_temporal_target_is_hard_to_breach(cfg) -> None:
-    """FINDING (D10): TF is a whole-frame MEAN of the motion-compensated
-    difference, so it saturates near 1.
+@requires_models
+def test_decision2_flicker_is_no_longer_a_missed_target_that_passes(scorer, cfg) -> None:
+    """Severe shimmer must now be caught by the TF target.
 
-    Breaching the 0.80 target needs consecutive frames differing by an average
-    of >51 grey levels after motion compensation — catastrophic, not flicker.
-    The severe-shimmer fixture scores well inside the target.
+    At the old tf_min of 0.80 this fixture scored 0.916 and sailed through the
+    very target meant to catch it. At 0.95 it is flagged.
     """
-    flicker = S.temporal_fidelity(*consecutive("flicker_pair"), cfg.temporal)
-    assert flicker >= cfg.targets.tf_min, (
-        "if this now fails, TF became more sensitive — revisit D10 and the band"
+    prev, curr = consecutive("flicker_pair")
+    got = scorer.score_frame(
+        frame="flicker_pair", source=prev, restyled=curr,
+        references=[prev], previous_restyled=prev,
     )
-    breach_level = (1.0 - cfg.targets.tf_min) * 255.0
-    assert breach_level == pytest.approx(51.0)
+    assert got.temporal < cfg.targets.tf_min
+    assert got.verdict is S.Verdict.BORDERLINE
+    assert got.reason is S.VerdictReason.TARGETS_MISSED
+    assert "tf" in got.missed_targets
+
+
+def test_decision2_tf_target_is_now_expressive(cfg) -> None:
+    """static > real motion > flicker, with the target cutting between them."""
+    static = S.temporal_fidelity(*consecutive("static_pair"), cfg.temporal)
+    motion = S.temporal_fidelity(*consecutive("high_motion"), cfg.temporal)
+    flicker = S.temporal_fidelity(*consecutive("flicker_pair"), cfg.temporal)
+
+    assert static > motion > flicker
+    assert cfg.targets.tf_min == 0.95
+    assert static >= cfg.targets.tf_min, "a still pair must clear the target"
+    assert flicker < cfg.targets.tf_min, "severe shimmer must breach it"
+
+
+def test_finding_d15_tf_target_also_flags_legitimate_fast_motion(cfg) -> None:
+    """FINDING (D15), OPEN: tf_min=0.95 does not separate motion from flicker.
+
+    Real motion scores 0.932 and severe flicker 0.916 — 0.016 apart. Any
+    threshold that catches the flicker also catches the motion, so fast action
+    shots will generate human-review load. Decision 2 was applied as directed;
+    this records the consequence rather than quietly absorbing it.
+    """
+    motion = S.temporal_fidelity(*consecutive("high_motion"), cfg.temporal)
+    flicker = S.temporal_fidelity(*consecutive("flicker_pair"), cfg.temporal)
+
+    assert motion < cfg.targets.tf_min, "legitimate motion is flagged"
+    assert abs(motion - flicker) < 0.05, (
+        "motion and flicker are too close for one threshold to separate them"
+    )
