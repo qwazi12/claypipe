@@ -378,3 +378,12 @@
 - Scope for this session: Build Order step 1 ONLY (skeleton + extract + assemble
   with DummyBackend). Step 2 not to start until step 1 acceptance passes AND the
   operator confirms.
+
+## Auto-checkpoint log (newest first)
+
+Written by `.claude/hooks/checkpoint.sh` on the Stop hook. These are safety-net
+commits, not the deliberate step checkpoints P2 asks for — those are the entries
+in the Log section above.
+
+<!-- checkpoint-insert -->
+- 2026-09-09T23:15:41Z — 1 file(s): .claude/ 
