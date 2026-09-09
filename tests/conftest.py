@@ -2,10 +2,17 @@
 
 from __future__ import annotations
 
+import os
 import subprocess
 from pathlib import Path
 
 import pytest
+
+# Hard-lock the test process offline for model hubs. Learned-metric tests use
+# the local cache or skip; they never download. Set before any torch/open_clip
+# import so the flag is in place when a hub client is first constructed.
+os.environ["HF_HUB_OFFLINE"] = "1"
+os.environ["TRANSFORMERS_OFFLINE"] = "1"
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 TEST_CLIP = REPO_ROOT / "assets" / "test_clip.mp4"

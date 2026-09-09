@@ -26,3 +26,32 @@ thresholds:
   pass: 0.75        # F >= pass          -> auto-accept
   borderline: 0.65  # borderline <= F < pass -> retry once at strength -0.10
                     # F < borderline     -> retry with a new seed
+
+# Canny edge extraction. LPIPS is measured on THESE maps, never on raw colour:
+# a correct restyle SHOULD change colour and texture, and only geometry is
+# allowed to be graded. Tuning these changes what "geometry" means.
+canny:
+  blur_kernel: 5      # Gaussian pre-blur, odd; suppresses texture-level edges
+  low_threshold: 100
+  high_threshold: 200
+
+# Farneback optical flow, for temporal fidelity between consecutive restyled
+# frames. Defaults are OpenCV's documented values.
+temporal:
+  pyr_scale: 0.5
+  levels: 3
+  winsize: 15
+  iterations: 3
+  poly_n: 5
+  poly_sigma: 1.2
+
+# Model choices for the two learned metrics. Weights are downloaded once and
+# cached; scoring never downloads mid-run.
+models:
+  lpips_net: alex             # lpips backbone: alex | vgg | squeeze
+  # `-quickgelu` is REQUIRED with the openai checkpoint: those weights were
+  # trained with QuickGELU activations, and open_clip warns (but proceeds) if
+  # you pair them with a plain-GELU architecture, silently producing embeddings
+  # the checkpoint was never trained to emit.
+  identity_model: ViT-B-32-quickgelu
+  identity_pretrained: openai # open_clip checkpoint tag

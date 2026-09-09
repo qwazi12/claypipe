@@ -136,6 +136,44 @@ class ScoreThresholds(BaseModel):
         return self
 
 
+class CannyConfig(BaseModel):
+    model_config = {"extra": "forbid"}
+
+    blur_kernel: int = Field(gt=0)
+    low_threshold: int = Field(ge=0, le=255)
+    high_threshold: int = Field(ge=0, le=255)
+
+    @model_validator(mode="after")
+    def _checks(self) -> "CannyConfig":
+        if self.blur_kernel % 2 == 0:
+            raise ValueError(f"canny.blur_kernel must be odd, got {self.blur_kernel}")
+        if self.low_threshold >= self.high_threshold:
+            raise ValueError(
+                f"canny.low_threshold ({self.low_threshold}) must be below "
+                f"high_threshold ({self.high_threshold})"
+            )
+        return self
+
+
+class TemporalConfig(BaseModel):
+    model_config = {"extra": "forbid"}
+
+    pyr_scale: float = Field(gt=0.0, lt=1.0)
+    levels: int = Field(gt=0)
+    winsize: int = Field(gt=0)
+    iterations: int = Field(gt=0)
+    poly_n: int = Field(gt=0)
+    poly_sigma: float = Field(gt=0.0)
+
+
+class ModelsConfig(BaseModel):
+    model_config = {"extra": "forbid"}
+
+    lpips_net: str
+    identity_model: str
+    identity_pretrained: str
+
+
 class WeightsConfig(BaseModel):
     model_config = {"extra": "forbid"}
 
@@ -143,6 +181,9 @@ class WeightsConfig(BaseModel):
     weights: ScoreWeights
     targets: ScoreTargets
     thresholds: ScoreThresholds
+    canny: CannyConfig
+    temporal: TemporalConfig
+    models: ModelsConfig
 
 
 def _load_yaml(path: Path) -> dict:

@@ -1,9 +1,15 @@
 # MEMORY — ClayPipe
 
 ## Current State
-- **Build Order step 1 of 6 is COMPLETE and green.** The full pipeline runs
-  end-to-end offline on the synthetic test clip: intake -> batch -> assemble.
-- 20 tests pass in ~28s. Zero network calls, zero API spend, no credential needed.
+- **Steps 1 and 2 of 6 are COMPLETE and green.** Step 1: the pipeline runs
+  end-to-end offline (intake -> batch -> assemble). Step 2: `pipeline/score.py`
+  implements the composite F score over 11 synthetic fixture cases.
+- 76 tests pass in ~33s with model weights warm; 43 pass / 33 skip / 0 fail on a
+  cold clone (learned-metric tests skip rather than download). Zero network calls
+  during tests, zero API spend, no credential needed.
+- **TWO DESIGN FINDINGS ARE OPEN AND NEED AN OPERATOR DECISION — see D9 and D10.**
+  Step 3 should not be built until they are settled, because the retry policy is
+  driven by exactly the verdicts these findings say are under-triggering.
 - Nothing deployed anywhere (this is a local CLI, not a service). Nothing can
   spend money yet: `dummy` is the only backend and `--backend fal` refuses.
 - SPEC.md is the complete brief, including the Addendum (A1–A5) decided 2026-09-08.
@@ -76,11 +82,74 @@
   (For the record: the field was a plain `null` YAML entry with a comment — it
   was never encrypted or obfuscated, contrary to the brief's §14 characterisation.
   Nothing was stored, and no ID was ever invented.)
+- **D9 (2026-09-09) FINDING — the composite F cannot gate identity or temporal
+  drift. OPEN, needs operator decision.** With the specified weights
+  (0.40/0.25/0.20/0.15), take a frame perfect in every other respect and drive
+  ONE component to its worst possible value:
+  | component at worst | F | verdict |
+  |---|---|---|
+  | SSIM = 0 | 0.600 | FAIL |
+  | LPIPS_edges = 1 | 0.750 | PASS (exactly on the line) |
+  | ID = 0 | 0.800 | PASS |
+  | TF = 0 | 0.850 | PASS |
+  Only SSIM can single-handedly trigger FAIL. So brief §9 failure modes 2
+  (temporal flicker) and 3 (identity drift) — both listed as "prevented at
+  BATCH" — are NOT gated by the composite at all. Shown on a real fixture:
+  `structure_destroyed` has mangled geometry and ID 0.653 against a 0.85 target,
+  and still scores F=0.814 PASS. The per-component `targets_met` dict catches
+  it; the verdict ignores `targets_met` entirely.
+  Formula left EXACTLY as specified — not silently patched. Pinned by
+  `test_finding_identity_or_temporal_alone_cannot_drop_below_pass` and
+  `test_finding_per_component_targets_catch_what_the_composite_misses`.
+  Options put to the operator: (a) leave F alone and make step 3 treat any
+  missed component target as a flag/retry trigger independent of F;
+  (b) re-weight; (c) redefine PASS as "F >= 0.75 AND all component targets met".
+- **D10 (2026-09-09) FINDING — the TF target of 0.80 is nearly unbreachable.
+  OPEN, needs operator decision.** TF is `1 - mean(|flow-warped prev - curr|)/255`
+  over the WHOLE frame, so it is dominated by the unchanged majority of the
+  frame and saturates near 1. Breaching TF < 0.80 requires consecutive frames
+  differing by an average of >51 grey levels after motion compensation, which is
+  catastrophic rather than flickery. Measured: still pair 0.997, large real
+  motion 0.932, severe whole-surface shimmer 0.916 — the shimmer fixture sits
+  comfortably inside a target meant to catch it.
+  The RANKING is correct (flicker < motion < static), so the metric is
+  directionally sound; only its sensitivity and threshold are wrong.
+  Options: (a) keep the mean and treat TF as a catastrophe detector only;
+  (b) use a high percentile (p95/p99) of the warped difference instead of the
+  mean — config change plus a one-line formula change inside the metric;
+  (c) raise the TF target from 0.80 to ~0.95 — pure config, no code change.
+  Pinned by `test_finding_temporal_target_is_hard_to_breach`.
+- **D11 (2026-09-09) open_clip must use `ViT-B-32-quickgelu`, not `ViT-B-32`.**
+  The `openai` checkpoint was trained with QuickGELU activations. Pairing it with
+  the plain-GELU architecture makes open_clip emit a WARNING and proceed,
+  silently producing embeddings the checkpoint was never trained to emit.
+  Caught from that warning during step 2. Measured effect on identity: up to
+  +0.035 on the face-swap fixture. Corrected in `weights.yaml`.
+- **D12 (2026-09-09) Identity scoring requires Stage-0 references and hard-fails
+  without them.** ID carries weight 0.20 in a fixed formula, so there is no
+  defined score with no reference. `insightface` was rejected in favour of
+  `open_clip`: insightface is a HUMAN FACE recogniser and will frequently detect
+  no face at all on a claymation or LEGO character, which is the exact material
+  this pipeline produces. **OPEN QUESTION for the operator:** the `logo` style
+  has no character at all, so it currently cannot be scored. Decide before logo
+  clips run.
+- **D13 (2026-09-09) Learned-metric model weights are warmed deliberately, never
+  downloaded during a run or a test.** `tests/conftest.py` sets
+  `HF_HUB_OFFLINE=1`/`TRANSFORMERS_OFFLINE=1`; `score.models_are_cached()` is a
+  pure predicate and the LPIPS/identity tests skip when the cache is cold.
+  Verified: cold clone gives 43 passed / 33 skipped / 0 failed.
+  macOS note: the first warm-up needs `SSL_CERT_FILE=$(python -c "import certifi;
+  print(certifi.where())")` — the python.org framework build ships no CA bundle
+  and the download fails with CERTIFICATE_VERIFY_FAILED without it.
 
 ## Pending / Next
 - ~~A4 — Drive folder ID~~ CLOSED as out of scope by operator direction, see D8.
   Cross-repo integration deferred; ClayPipe's output dir is the contract surface.
-- Step 2 — scoring module (SSIM / LPIPS-on-edges / ID / TF). IN PROGRESS.
+- Step 2 — scoring module. DONE, green. Two findings open: D9, D10.
+- **BLOCKING STEP 3: resolve D9 and D10.** The retry policy branches on
+  PASS/BORDERLINE/FAIL, and D9 says those verdicts under-trigger for two of the
+  five failure modes. Building retry on top of that would bake the gap in.
+- D12 open: how should styles with no character (e.g. `logo`) score ID?
 - Step 3 — retry + cost firewalls, incl. A3 cumulative PROJECT-level spend cap
   (the per-run `--max-cost-usd` alone does not stop ten aborted runs costing 10×).
 - Step 4 — human gate HTML pages; Step 5 — FalBackend; Step 6 — CLI polish + README.
@@ -91,6 +160,27 @@
 - RUNBOOK.md / CONFIG.md (Rule 33) not written yet — due with step 6.
 
 ## Log (append-only, newest first)
+
+### 2026-09-09 — Step 2 shipped: scoring module + 11 fixture cases
+- Built `pipeline/score.py`: SSIM, LPIPS-on-Canny-edges, open_clip identity,
+  Farneback optical-flow temporal fidelity, composite F, PASS/BORDERLINE/FAIL,
+  and a per-component `targets_met` diagnostic. Models sit behind
+  `PerceptualDistance` / `IdentityEmbedder` protocols.
+- `weights.yaml` gained `canny`, `temporal` and `models` sections; all validated
+  on startup by new pydantic models. Still nothing numeric hardcoded in score.py.
+- `tests/fixtures/generate.py` writes 11 deterministic cases from fixed
+  arithmetic (no RNG in the images, no third-party assets): identical,
+  recolored_only, edge_shifted, gaussian_blurred, face_swapped, low_light,
+  neumorphic, structure_destroyed, wrong_scene, plus static/high_motion/flicker
+  pairs for temporal.
+- Two fixtures had to be strengthened mid-step, and both taught something:
+  the first flicker fixture used small random blobs and scored TF 0.978 — ABOVE
+  real motion (0.932), an inverted ranking — because TF is a whole-frame mean.
+  Rebuilt as realistic whole-surface shimmer, which ranks correctly (0.916) and
+  exposed D10. Separately, no original fixture reached the FAIL band at all, so
+  `structure_destroyed` and `wrong_scene` were added; only the latter FAILs.
+- Caught D11 (QuickGELU) from a warning rather than ignoring it.
+- Suite: 76 passed warm, 43 passed / 33 skipped cold. Step 3 NOT started.
 
 ### 2026-09-09 — Resume: two deviations resolved before any new code
 - D1 (PIL header overlay) APPROVED by operator as a deliberate, permanent design
