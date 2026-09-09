@@ -23,6 +23,7 @@ from .pipeline.retry import RetryController
 from .pipeline.score import Scorer, ScoringError, load_image
 from .pipeline.retry import RunHalted, SpendLedger
 from .run import Run, resolve_run
+from . import snapshot as snapshot_mod
 from .verdi import canary_page, flag_page
 from .verdi import loaders as verdi_loaders
 
@@ -582,6 +583,41 @@ def canary_submit(
         for name, entry in sorted(verdict.get("frames", {}).items()):
             note = f" — {entry.get('note')}" if entry.get("note") else ""
             typer.echo(f"  {name}: {entry.get('verdict')}{note}")
+
+
+@app.command()
+def export(
+    run_dir: Optional[Path] = typer.Argument(None, help="Run directory or run id; omit for all runs"),
+    runs_dir: Optional[Path] = typer.Option(None, "--runs-dir"),
+    out: Optional[Path] = typer.Option(None, "--out", help="Write to a file instead of stdout"),
+) -> None:
+    """Serialise run state as JSON — the contract a dashboard consumes.
+
+    With a run id, exports that run in full. With no argument, exports an index
+    of every run. The snapshot carries metadata only: no absolute paths, no
+    frames, no secrets, because it is built to leave this machine.
+    """
+    styles, _, _ = _startup()
+    base = Path(runs_dir or styles.output.runs_dir)
+
+    if run_dir is None:
+        document = snapshot_mod.build_index(base)
+    else:
+        run, _ = _load_run_for(run_dir, runs_dir, styles)
+        document = snapshot_mod.build_snapshot(run)
+
+    try:
+        snapshot_mod.assert_no_local_paths(document)
+    except ValueError as exc:
+        _fail(str(exc))
+
+    text = json.dumps(document, indent=2)
+    if out is not None:
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(text + "\n")
+        typer.echo(out)
+    else:
+        typer.echo(text)
 
 
 @app.command()

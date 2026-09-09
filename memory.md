@@ -313,8 +313,50 @@
   polls that path, so a half-written file could be caught mid-read. Written to
   `.json.tmp` then `Path.replace`d, which is atomic within a filesystem. Proven
   by intercepting the rename, not by inspection.
+- **D32 (2026-09-09, OPERATOR DIRECTION) ClayPipe gets a remote dashboard.
+  This CHANGES the scope rule.** Asked what should go to Railway and Vercel, the
+  operator answered: *"i want to be able to see track and interact with this
+  tool."* That reverses the standing "ClayPipe produces an mp4 and stops" rule
+  (build-brief §14) and sits beside SPEC §5's "No web server" — which was written
+  about the REVIEW PAGES needing no local server, and is not violated by a
+  separately hosted dashboard, but is adjacent enough to name here.
+  **The build brief and SPEC §14 are superseded on this point by the operator's
+  2026-09-09 direction.** Recorded so a later session does not "correct" it back.
+  Architecture, forced by the fact that ClayPipe runs LOCALLY (ffmpeg, torch,
+  60+ frames a clip) and its state is a directory on the operator's disk that
+  nothing hosted can see:
+      ClayPipe (local)  --snapshot-->  Railway (API + store)  <--  Vercel (UI)
+                        <--verdict---
+  Interaction means approving or rejecting a canary from the dashboard, which is
+  genuinely useful: the gate currently requires being at the machine.
+- **D33 (2026-09-09) `claypipe export` is the dashboard contract, and it is
+  path-scrubbed by construction.** A snapshot is built to LEAVE the machine, so
+  it carries basenames only, metadata only, no frames and no secrets (Rule 6).
+  `assert_no_local_paths()` refuses to publish a document containing `/Users/`,
+  `/home/`, `/private/var/` or a Windows drive path, and incident notes have
+  their absolute `run_dir` stripped. The snapshot is DERIVED: the run directory
+  stays authoritative and a snapshot can always be rebuilt.
+- **Accounts (verified 2026-09-09):** Vercel CLI authenticated as `qwazi12`;
+  Railway CLI authenticated as **`shoppykid1@gmail.com`**, which is NOT the
+  operator's work address (`kyeboah@kymediamgmt.com`) — flagged, not assumed
+  wrong. No Railway project linked to this repo yet.
+- **SocialPilot P0 carried, not adopted:** `socialpilot-ui/config/googleAuth.json`
+  is STILL TRACKED in that repo (`git ls-files` confirms; committed in 59c9a14)
+  and holds a real GCP service-account private key with Editor access to the
+  sheet. Operator said "disregard for now and keep building" on 2026-09-09, so it
+  stays open THERE. Recorded here only so it is not lost: deploying that repo
+  anywhere copies a live key into another build environment.
 
 ## Pending / Next
+- **Dashboard workstream (D32), in dependency order:**
+  1. `claypipe export` snapshot contract — DONE.
+  2. Railway: API service + persistent store that accepts snapshots and serves
+     them; returns canary verdicts. Needs `railway link` (no project yet).
+  3. Vercel: Next.js dashboard reading that API.
+  4. `claypipe publish` — push a snapshot from a local run; poll for a remote
+     verdict so the canary gate can be cleared from the dashboard.
+  Auth for the API is UNDECIDED and must be settled before step 2 ships — a
+  world-readable endpoint would expose run metadata and spend.
 - **ARM THE AUTO-CHECKPOINT HOOK (operator action, D26).** `.claude/settings.json`
   does not exist yet; creating it was blocked by the permission classifier. The
   hook script is committed at `.claude/hooks/checkpoint.sh` and verified working.
@@ -344,6 +386,16 @@
 - RUNBOOK.md / CONFIG.md (Rule 33) not written yet — due with step 6.
 
 ## Log (append-only, newest first)
+
+### 2026-09-09 — Direction change mid-step: dashboard workstream opened
+- Operator asked to "see track and interact with this tool" (D32). Step 5 was
+  parked CLEAN at commits 1-5 — nothing half-finished, nothing unpushed.
+- Built `claypipe/snapshot.py` + `claypipe export`: one JSON document per run
+  (stage, progress, canary gate state, scores, cost, incidents, artefacts), and
+  an index across runs. Path-scrubbed by construction (D33).
+- Step 5 commits 6-7 (--live flag, FalBackend) remain buildable and unstarted.
+  Commits 8-10 need a real FAL_KEY, which this machine does not have.
+- 9 new tests, 166 green.
 
 ### 2026-09-09 — Step 5 commits 3-5: canary render / pack / submit
 - `claypipe canary render|pack|submit` close the loop Step 4 left open: the
