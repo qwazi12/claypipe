@@ -1,0 +1,41 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "claypipe"
+version = "0.1.0"
+description = "Automated AI recreation comparison video pipeline (9:16 split-screen)"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "UNLICENSED" }
+
+# Step-1 (offline) dependencies only. Heavier stacks are staged as extras and
+# installed when their Build Order step lands — see memory.md D3.
+dependencies = [
+    "typer>=0.12",
+    "pydantic>=2.6",
+    "PyYAML>=6.0",
+    "Pillow>=10.0",
+]
+
+[project.optional-dependencies]
+# Build Order step 2
+scoring = ["scikit-image>=0.22", "lpips>=0.1.4", "opencv-python>=4.9", "open-clip-torch>=2.24"]
+# Build Order step 2 (shot detection)
+shots = ["scenedetect[opencv]>=0.6.4"]
+# Build Order step 6 (captions)
+captions = ["faster-whisper>=1.0"]
+# Build Order step 5 (real API backend — never used in tests)
+fal = ["fal-client>=0.4"]
+dev = ["pytest>=8.0"]
+
+[project.scripts]
+claypipe = "claypipe.cli:app"
+
+[tool.setuptools.packages.find]
+include = ["claypipe*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"

@@ -1,0 +1,55 @@
+# ClayPipe — style profiles and render settings (SPEC §2, §6; Rule 25).
+# Everything here is versioned config. Nothing in this file may be hardcoded
+# in Python. Validated on startup by claypipe/config.py — a bad value is a
+# startup crash, not a silent default.
+version: 1
+
+render:
+  # 9:16 canvas. header + panel + divider + panel MUST equal height.
+  width: 1080
+  height: 1920
+  header_height: 130
+  panel_height: 882
+  divider_height: 26
+  crf: 18
+  pix_fmt: yuv420p
+  default_fps: 12
+  header_font_size: 54
+  # First existing path wins. Startup fails loudly if none exist.
+  font_candidates:
+    - /System/Library/Fonts/Supplemental/Arial Bold.ttf
+    - /System/Library/Fonts/Supplemental/Arial.ttf
+    - /Library/Fonts/Arial Bold.ttf
+    - /usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf
+
+output:
+  # Where finished runs are written (SPEC A4: configurable output directory).
+  runs_dir: runs
+  # Google Drive folder that SocialPilot AI round-robin-ingests (SPEC A4).
+  # TBD — the operator must supply this. NEVER invent an ID here.
+  drive_folder_id: null
+
+styles:
+  clay:
+    prompt: >-
+      claymation, plasticine clay stop-motion, fingerprints in clay, handmade
+      miniature set, Aardman style, keep exact same composition, pose, camera
+      angle, framing and colors
+    strength: 0.65
+    background_color: "#F2C230"
+    header_text_color: "#1A1A1A"
+  lego:
+    prompt: >-
+      LEGO minifigure stop-motion, glossy plastic bricks, LEGO movie style,
+      brick-built environment, keep exact same composition, pose, camera angle,
+      framing and colors
+    strength: 0.65
+    background_color: "#F2C230"
+    header_text_color: "#1A1A1A"
+  logo:
+    prompt: >-
+      flat 2D logo-style motion graphic, bold shapes, brand colors, keep exact
+      same composition and framing
+    strength: 0.55
+    background_color: "#101820"
+    header_text_color: "#F2C230"

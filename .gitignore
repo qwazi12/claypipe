@@ -1,0 +1,38 @@
+# ===== SECRETS (Rules 1, 2, 8) — never commit =====
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+*auth*.json
+service_account*.json
+credentials.json
+
+# ===== Python =====
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# ===== Run artifacts (large, regenerable) =====
+runs/
+*.mp4
+*.mov
+*.mkv
+*.aac
+*.wav
+!assets/test_clip.mp4
+
+# ===== Model caches =====
+.cache/
+~/.cache/torch
+
+# ===== OS / editor =====
+.DS_Store
+.vscode/*
+!.vscode/extensions.json
+.idea/

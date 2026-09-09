@@ -1,0 +1,28 @@
+# ClayPipe — fidelity scoring weights and thresholds (SPEC §3; Rule 25).
+# The FORMULA is fixed in code:
+#   F = w.ssim*SSIM + w.lpips_edges*(1 - LPIPS_edges) + w.id*ID + w.tf*TF
+# The WEIGHTS are per-project tuning and live here. Weights must sum to 1.0;
+# config validation rejects anything else at startup.
+#
+# NOTE: consumed by the scoring module, which lands in Build Order step 2.
+# Step 1 only validates this file — it does not score.
+version: 1
+
+weights:
+  ssim: 0.40
+  lpips_edges: 0.25
+  id: 0.20
+  tf: 0.15
+
+# Per-component targets (SPEC §3). Diagnostic: they explain WHY a frame failed.
+targets:
+  ssim_min: 0.72
+  lpips_edges_max: 0.35
+  id_min: 0.85
+  tf_min: 0.80
+
+# Composite verdict bands (SPEC §3).
+thresholds:
+  pass: 0.75        # F >= pass          -> auto-accept
+  borderline: 0.65  # borderline <= F < pass -> retry once at strength -0.10
+                    # F < borderline     -> retry with a new seed
