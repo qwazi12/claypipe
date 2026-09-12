@@ -1,5 +1,7 @@
 # PROJECT: ClayPipe — Automated AI Recreation Comparison Video Pipeline
 
+> weights.yaml is authoritative. SPEC.md documents intent; values live in YAML.
+
 ## Mission
 
 Build a production-grade CLI system that takes any source video as input and outputs

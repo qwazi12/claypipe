@@ -647,7 +647,7 @@ def status(
         card = json.loads(run.paths.qc_card.read_text())
         typer.echo(f"verdict    {card.get('verdict')}")
     # Stated plainly rather than shown as an empty field (Rule 40).
-    typer.echo("scoring    not built yet (Build Order step 2)")
+    typer.echo("scoring    live on paid backends; skipped on dummy (D27)")
     typer.echo("captions   not built yet (burned in automatically once subs.srt exists)")
 
 

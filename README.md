@@ -10,21 +10,24 @@ construction, then verified by hashing the audio stream.
 
 See `SPEC.md` for the full brief and `memory.md` for current state and decisions.
 
-## Status — Build Order step 1 of 6
+## Status
 
-Working today: the complete pipeline **offline**, with a free `dummy` backend.
+The pipeline runs end to end **offline** today. Scoring, the retry policy and
+all five cost firewalls are live. The paid backend is wired but stubbed.
 
 | Step | What | State |
 |------|------|-------|
-| 1 | Skeleton + extract + assemble (DummyBackend) | **done** |
-| 2 | Scoring (SSIM / LPIPS-on-edges / ID / TF) | not started |
-| 3 | Retry policy + cost firewalls | not started |
-| 4 | Human gates (canary + flag review HTML) | not started |
-| 5 | `FalBackend` — real API, real spend | not started |
-| 6 | CLI polish + README of a real run | not started |
+| 1 | Skeleton + extract + assemble (DummyBackend) | done — `a0dcba9` |
+| 2 | Scoring (SSIM / LPIPS-on-edges / ID / TF) | done — `c30dfe2` |
+| 3 | Retry policy + cost firewalls | done — `cae2628` |
+| 4 | Human gates (canary + flag review HTML) | done — `404e43c` |
+| 5 | Gate + scorer wiring, canary CLI, snapshot export | done — `4d63767`, `8dc3512`, `f4dcf3b`, `6f9421a` |
+| 5 | `FalBackend` — real API, real spend | **stubbed**; no live call has ever been made |
+| 6 | CLI polish + docs of a real run | done — see `docs/REAL_RUN.md` |
 
-Nothing in the repo can spend money yet: the only backend is `dummy`, and
-`--backend fal` refuses with a clear error.
+Nothing in the repo has ever spent money. `--backend fal` refuses unless BOTH
+`--live` is passed and `FAL_KEY` is set, and the backend itself is a stub that
+raises rather than calling an endpoint.
 
 ## Requirements
 
