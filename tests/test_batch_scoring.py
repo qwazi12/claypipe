@@ -98,7 +98,7 @@ def stub(monkeypatch) -> StubBackend:
     backend = StubBackend()
     monkeypatch.setattr(
         cli, "get_backend",
-        lambda name: backend if name == "stub" else R.get_backend(name),
+        lambda name, **kw: backend if name == "stub" else R.get_backend(name, **kw),
     )
 
     real_load_all = cli.load_all
@@ -121,7 +121,7 @@ def test_batch_refuses_an_unpriced_backend(tmp_path, test_clip, monkeypatch) -> 
     backend = StubBackend()
     monkeypatch.setattr(
         cli, "get_backend",
-        lambda name: backend if name == "stub" else R.get_backend(name),
+        lambda name, **kw: backend if name == "stub" else R.get_backend(name, **kw),
     )
     run_path = make_run(tmp_path, test_clip, backend="stub", refs=[FIXTURES / "identical" / "source.png"])
     approve(run_path)
@@ -302,7 +302,7 @@ def test_retry_decision_reaches_the_backend_with_lower_strength(
     arguments, which is the half a policy unit-test cannot see.
     """
     backend = DegradedStub(bad_attempts=1)
-    monkeypatch.setattr(cli, "get_backend", lambda name: backend)
+    monkeypatch.setattr(cli, "get_backend", lambda name, **kw: backend)
     real_load_all = cli.load_all
 
     def priced():
@@ -332,7 +332,7 @@ def test_a_backend_that_never_recovers_trips_the_retry_budget(
     the exact failure pattern the budget designs out.
     """
     backend = DegradedStub(bad_attempts=99)
-    monkeypatch.setattr(cli, "get_backend", lambda name: backend)
+    monkeypatch.setattr(cli, "get_backend", lambda name, **kw: backend)
     real_load_all = cli.load_all
 
     def priced():

@@ -20,6 +20,7 @@ from claypipe.pipeline import qccard
 from claypipe.pipeline.extract import count_frames, extract_audio, extract_frames, frame_paths
 from claypipe.pipeline.restyle import DummyBackend, get_backend, restyle_frames
 from claypipe.run import Run
+from tests.conftest import TEST_CLIP
 
 EXPECTED_FPS = 12
 EXPECTED_FRAMES = 60  # 5s clip @ 12fps
@@ -195,10 +196,27 @@ def test_dummy_backend_is_deterministic_and_keeps_geometry(
         assert s.tobytes() != r.tobytes(), "restyle was a no-op"
 
 
-def test_fal_backend_is_unavailable_offline() -> None:
-    """Tests must never be able to reach a paid endpoint (Rule 32)."""
-    with pytest.raises(NotImplementedError, match="step 5"):
-        get_backend("fal")
+def test_fal_backend_is_unavailable_offline(tmp_path: Path) -> None:
+    """Tests must never be able to reach a paid endpoint (Rule 32).
+
+    The fal backend now EXISTS (stubbed), so the refusal moved from
+    construction to the call itself: it can be built and inspected, and still
+    cannot restyle anything without both --live and an injected client.
+    """
+    backend = get_backend("fal")
+    assert backend.name == "fal" and backend.live is False
+
+    with pytest.raises(NotImplementedError, match="requires --live and FAL_KEY"):
+        backend.restyle(
+            TEST_CLIP, tmp_path / "out.png", prompt="p", strength=0.6, seed=1
+        )
+
+    # --live without a client is still inert: there is nothing to call.
+    with pytest.raises(NotImplementedError):
+        get_backend("fal", live=True).restyle(
+            TEST_CLIP, tmp_path / "out.png", prompt="p", strength=0.6, seed=1
+        )
+
     with pytest.raises(ValueError, match="unknown backend"):
         get_backend("replicate")
 

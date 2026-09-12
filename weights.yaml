@@ -136,6 +136,12 @@ firewalls:
     max_cost_usd_run: null
     max_cost_usd_project: null
 
+  # fal.ai endpoint selection. Flux Kontext is operator-pinned over
+  # SDXL+ControlNet (SPEC Addendum A2): it preserves structure better in one
+  # shot, and structure is what the whole scoring stack grades.
+  fal:
+    model: "fal-ai/flux-pro/kontext"
+
 # --------------------------------------------------------------------------
 # Human review pages (SPEC §5). Self-contained HTML, opened via `webbrowser`,
 # no web server. These are thresholds, so they live here and not in code.

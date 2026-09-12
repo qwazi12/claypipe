@@ -218,9 +218,16 @@ class CostConfig(BaseModel):
             ) from None
 
 
+class FalModelConfig(BaseModel):
+    model_config = {"extra": "forbid"}
+
+    model: str = Field(min_length=1)
+
+
 class FirewallConfig(BaseModel):
     model_config = {"extra": "forbid"}
 
+    fal: FalModelConfig | None = None
     max_retries_per_frame: int = Field(ge=0)
     total_retry_budget_fraction: float = Field(gt=0.0, le=1.0)
     borderline_strength_delta: float = Field(lt=0.0)

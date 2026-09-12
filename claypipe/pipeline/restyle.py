@@ -209,3 +209,135 @@ def _score_and_record(
         with scores_path.open("a") as fh:
             fh.write(json.dumps(score.to_dict()) + "\n")
     return score
+
+# --------------------------------------------------------------------------
+# The paid backend. Stubbed: no network call exists in this file yet.
+# --------------------------------------------------------------------------
+
+class FalCallError(RuntimeError):
+    """A fal.ai call failed. Carries the response body for the incident note."""
+
+    def __init__(self, message: str, *, response_body: str = "", status: int | None = None) -> None:
+        super().__init__(message)
+        self.response_body = response_body
+        self.status = status
+
+
+@runtime_checkable
+class FalClientLike(Protocol):
+    """The seam the real client plugs into, and the tests stand in for.
+
+    Kept deliberately narrow — one method — so a stub is trivially faithful and
+    so nothing in the pipeline can reach past it to the network.
+    """
+
+    def edit_image(
+        self, *, image_bytes: bytes, prompt: str, strength: float, seed: int, model: str
+    ) -> bytes:
+        """Return restyled PNG bytes, or raise FalCallError."""
+
+
+class FalBackend:
+    """fal.ai image edit (Flux Kontext), operator-pinned over SDXL+ControlNet.
+
+    NO NETWORK CODE LIVES HERE YET. `restyle()` refuses unless it has been given
+    a client, and the only client that exists today is the test stub. The real
+    one lands with the first live canary, which is a manual operator step by
+    design — a first paid call should be watched by a human, not discovered in
+    a log.
+
+    The cost estimate is read from config and is a CEILING, not a guess: a call
+    that would cost more than the configured estimate is refused rather than
+    quietly charged.
+    """
+
+    name = "fal"
+
+    def __init__(
+        self,
+        *,
+        live: bool = False,
+        client: "FalClientLike | None" = None,
+        cfg: "object | None" = None,
+        model: str | None = None,
+    ) -> None:
+        self.live = live
+        self.client = client
+        self._cfg = cfg
+        self._model = model
+        self.planned_calls: list[dict] = []
+
+    # -- config ----------------------------------------------------------
+    def _firewalls(self):
+        if self._cfg is not None:
+            return self._cfg
+        from ..config import load_weights
+
+        self._cfg = load_weights().firewalls
+        return self._cfg
+
+    def cost_per_frame_usd(self) -> float:
+        from ..config import ConfigError
+
+        prices = self._firewalls().cost.estimated_usd_per_call
+        if "fal" not in prices:
+            raise ConfigError(
+                "firewalls.cost.estimated_usd_per_call.fal is required when "
+                "--backend fal. Refusing to spend against an unknown price."
+            )
+        return prices["fal"]
+
+    def model_name(self) -> str:
+        if self._model:
+            return self._model
+        models = getattr(self._firewalls(), "fal", None)
+        return getattr(models, "model", None) or DEFAULT_FAL_MODEL
+
+    def assert_affordable(self, quoted_usd: float) -> None:
+        """The configured estimate is a CEILING on what a call may cost.
+
+        If the endpoint quotes above it, that is a pricing change nobody
+        approved, and the run stops rather than absorbing it silently.
+        """
+        ceiling = self.cost_per_frame_usd()
+        if quoted_usd > ceiling:
+            raise FalCallError(
+                f"endpoint quoted ${quoted_usd:.4f} per call, above the "
+                f"configured ceiling of ${ceiling:.4f} "
+                "(firewalls.cost.estimated_usd_per_call.fal). Refusing: a price "
+                "rise is a decision, not a rounding error."
+            )
+
+    # -- restyle ---------------------------------------------------------
+    def restyle(self, src: Path, dst: Path, *, prompt: str, strength: float, seed: int) -> None:
+        if not self.live or self.client is None:
+            raise NotImplementedError(
+                "FalBackend requires --live and FAL_KEY and a stubbed or real "
+                "client; see T7. No network code exists in this backend yet."
+            )
+        payload = self.client.edit_image(
+            image_bytes=src.read_bytes(), prompt=prompt, strength=strength,
+            seed=seed, model=self.model_name(),
+        )
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        dst.write_bytes(payload)
+
+    def plan(self, src: Path, *, prompt: str, strength: float, seed: int) -> dict:
+        """Dry run: what WOULD be called, and what it would be charged.
+
+        Records the intent without making it, so the ledger wiring can be
+        proven end to end with no network and no spend.
+        """
+        entry = {
+            "frame": src.name,
+            "model": self.model_name(),
+            "strength": strength,
+            "seed": seed,
+            "estimated_usd": self.cost_per_frame_usd(),
+            "prompt_chars": len(prompt),
+        }
+        self.planned_calls.append(entry)
+        return entry
+
+
+DEFAULT_FAL_MODEL = "fal-ai/flux-pro/kontext"
