@@ -373,6 +373,46 @@
   **Consequence for the Definition of Done:** DoD item 5 asks that
   `temporal.aggregation` print exactly `p95`. It prints `block_p95` — the value
   the brief's fallback selects. Reported rather than forced.
+- **D35 (2026-09-12) RESERVED, UNUSED.** The Step-6 brief reserved D35 for the
+  branch where `p95` AND `block_p95` both fail the temporal assertions, forcing
+  a revert to `mean`. That branch did not occur — `block_p95` passed all three
+  on first measurement (D34). Recorded so the gap in numbering is explained
+  rather than looking like a lost entry.
+- **D36 (2026-09-12) T7 deferred — FAL_KEY absent; dry-run-only verification.**
+  No live fal.ai call has been made from this repo, ever. The environment had
+  no `FAL_KEY` at T7 time, so the brief's own skip condition applied and the
+  commit chain goes T1-T6 then T8.
+  **A key WAS pasted into the session transcript by the operator.** It was not
+  used, not written to any file, and not committed. It must be treated as
+  exposed and rotated at fal.ai before any live run (Rule 8: a disclosed secret
+  is rotated, not just avoided). The operator stated they would set the key
+  themselves, which is the right handling — ClayPipe reads `FAL_KEY` from the
+  environment and never from an argument, because a command-line key lands in
+  shell history.
+  T7's two network-independent tests (`test_fal_real_api.py`) are deferred with
+  it: they exercise `RealFalClient`, which T7 would have introduced and which
+  does not exist. What DOES exist and is tested: the two-lock guard (T4), the
+  stubbed backend, the price ceiling and the dry-run ledger path (T5).
+  **Operator action to resume T7:** rotate the key, `export FAL_KEY=...`,
+  `pip install -e '.[fal]'`, then re-run this task.
+- **D37 (2026-09-12) Day-end invariants: pytest GREEN.** 190 passed, 0 failed,
+  0 skipped warm. Cold clone (model caches emptied): 157 passed, 33 skipped, 0
+  failed — the skips are exactly the LPIPS/CLIP learned-metric tests, which
+  skip rather than download.
+- **D38 (2026-09-12) TODO/FIXME/XXX audit: none.** `grep -rn "TODO\|FIXME\|XXX"
+  claypipe/ tests/` returns nothing. Recorded as required, not as an
+  achievement — it was already clean.
+- **D39 (2026-09-12) Four brief-vs-repo discrepancies, resolved toward the
+  repo** (authority ordering puts this prompt lowest):
+  1. `python -m claypipe` did not work — no `__main__.py`. DoD items 6 and 7
+     invoke it, so it was added in T4.
+  2. `batch` had no `--backend` flag; DoD 6/7 pass it. Added as an override of
+     the value locked at intake, persisted to run.json.
+  3. The brief's T6 transcript expects `runs/<id>/work/canary_review.html`. The
+     page is written to the run ROOT, not `work/`. Transcript reflects reality.
+  4. The brief's T6 expects `export` to write `export.json`/`index.json`
+     implicitly. It prints to stdout unless `--out` is given; the transcript
+     passes `--out` explicitly.
 
 ## Pending / Next
 - **Dashboard workstream (D32), in dependency order:**
@@ -413,6 +453,18 @@
 - RUNBOOK.md / CONFIG.md (Rule 33) not written yet — due with step 6.
 
 ## Log (append-only, newest first)
+
+### 2026-09-12 — T4-T8: paid-backend locks, stubbed FalBackend, docs
+- T4: two independent locks in front of any paid endpoint (--live for intent,
+  FAL_KEY for capability), checked before anything touches disk. Added
+  `claypipe/__main__.py` and a `--backend` override on batch.
+- T5: FalBackend stubbed. No network code in the file; fal-client still not
+  installed. The price in weights.yaml is a CEILING, not a guess.
+- T6: `docs/REAL_RUN.md` — verbatim end-to-end transcript, including the
+  batch that REFUSES for want of a canary verdict, because a happy-path-only
+  doc would misrepresent the tool.
+- T7: SKIPPED, no FAL_KEY (D36). No live call has ever been made.
+- 190 green.
 
 ### 2026-09-12 — T1-T3: stale text, extract sentinel, D15 closed
 - T1: cli.py claimed scoring was unbuilt three steps after it shipped; README
