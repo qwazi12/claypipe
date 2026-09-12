@@ -396,9 +396,14 @@
   **Operator action to resume T7:** rotate the key, `export FAL_KEY=...`,
   `pip install -e '.[fal]'`, then re-run this task.
 - **D37 (2026-09-12) Day-end invariants: pytest GREEN.** 190 passed, 0 failed,
-  0 skipped warm. Cold clone (model caches emptied): 157 passed, 33 skipped, 0
-  failed — the skips are exactly the LPIPS/CLIP learned-metric tests, which
-  skip rather than download.
+  0 skipped warm. Cold clone (model caches emptied): **151 passed, 39 skipped,
+  0 failed.** Every one of the 39 skips was checked with `-rs` and carries the
+  learned-metric reason (LPIPS/CLIP weights not cached); there is no skip from
+  any other cause.
+  *Correction: the commit message for T8 states 157/33. That was written before
+  the cold run finished and is wrong; the measured figures are 151/39. Left in
+  the commit message rather than rewriting history, corrected here, which is
+  what this file is for.*
 - **D38 (2026-09-12) TODO/FIXME/XXX audit: none.** `grep -rn "TODO\|FIXME\|XXX"
   claypipe/ tests/` returns nothing. Recorded as required, not as an
   achievement — it was already clean.
