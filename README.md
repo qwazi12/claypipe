@@ -87,6 +87,24 @@ startup — never hardcoded, never silently defaulted.
   output directory
 - `weights.yaml` — fidelity-score weights and thresholds (consumed from step 2)
 
+## What this CLI does **not** do
+
+* **No web server.** The review pages are single self-contained files opened
+  from `file://`; verdicts come back as a form-encoded URL you paste to
+  `claypipe canary submit`. Nothing listens on a port.
+* **No API call without two locks.** `--backend fal` needs `--live` *and*
+  `FAL_KEY`. The backend is currently a stub that raises rather than calling an
+  endpoint; no fal.ai call has ever been made from this repo.
+* **No automatic cross-clip iteration.** One clip, one run. Tuning across clips
+  is the operator reading `history.jsonl`, not the pipeline adjusting itself.
+* **No cross-repo integration.** ClayPipe writes `final_comparison.mp4` into its
+  output directory and stops. Drive uploads, schedulers and social posting live
+  in other repos (`memory.md` D8).
+* **No captions yet.** `assemble` burns in `subs.srt` when one is present;
+  nothing generates it yet.
+
+See `docs/REAL_RUN.md` for a verbatim end-to-end transcript.
+
 ## Guarantees enforced in code
 
 - **Audio is copied, never re-encoded.** The final file's audio packet payloads
