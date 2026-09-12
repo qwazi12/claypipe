@@ -67,15 +67,12 @@ class DummyBackend:
         styled.save(dst)
 
 
-def get_backend(name: str) -> RestyleBackend:
+def get_backend(name: str, *, live: bool = False) -> RestyleBackend:
     if name == "dummy":
         return DummyBackend()
     if name == "fal":
-        # Build Order step 5. Refuse clearly rather than degrade silently (Rule 5).
-        raise NotImplementedError(
-            "the 'fal' backend lands in Build Order step 5; use --backend dummy"
-        )
-    raise ValueError(f"unknown backend {name!r} (available: dummy)")
+        return FalBackend(live=live)
+    raise ValueError(f"unknown backend {name!r} (available: dummy, fal)")
 
 
 def restyle_frames(

@@ -41,6 +41,21 @@ raises rather than calling an endpoint.
 python3 -m venv .venv && .venv/bin/pip install -e '.[dev]'
 ```
 
+## Paid backends
+
+`--backend fal` needs **two** things, and refuses loudly without either:
+
+```bash
+export FAL_KEY=...                      # the capability
+claypipe batch "$RUN" --backend fal --live   # the intent
+```
+
+`--live` exists so a paid run cannot happen by accident — not from a stale
+shell export, not from a config file someone forgot about. Never pass a key as
+a command-line argument; it lands in your shell history. `.env` is gitignored.
+
+Install the client only when you need it: `pip install -e '.[fal]'`.
+
 ## Run the offline pipeline
 
 ```bash

@@ -8,6 +8,7 @@ until then `batch` is offline-only and cannot spend money.
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from typing import Optional
 
@@ -263,6 +264,38 @@ def _build_scoring(run: Run, weights, backend, frame_count: int, profile):
     return scorer, controller, loaded
 
 
+# Backends that cost real money. Everything not listed here is free.
+PAID_BACKENDS = {"fal"}
+
+
+def _guard_paid_backend(backend: str, *, live: bool) -> None:
+    """Two independent locks in front of any paid endpoint (Rule 5).
+
+    `--live` is the DELIBERATE act: it cannot arrive by accident, by a stale
+    shell export, or by a config file someone forgot about. FAL_KEY is the
+    CAPABILITY. Requiring both means neither an intentional run without
+    credentials nor an unintentional run with them reaches the endpoint — and
+    both refusals are loud at startup, not discovered mid-batch.
+    """
+    if backend not in PAID_BACKENDS:
+        return
+
+    if not live:
+        _fail(
+            f"Refusing to use paid backend {backend!r} without --live.\n"
+            "--live is a deliberate act: it says you intend to spend money on "
+            "this run. Add it only when you mean it."
+        )
+
+    if not os.environ.get("FAL_KEY", "").strip():
+        _fail(
+            f"backend {backend!r} needs FAL_KEY and it is unset or empty.\n"
+            "Export it in the shell that runs claypipe, or put it in .env "
+            "(which is gitignored). Never pass a key as a command-line "
+            "argument — it lands in your shell history."
+        )
+
+
 @app.command()
 def batch(
     run_dir: Path = typer.Argument(..., help="Run directory or run id"),
@@ -271,6 +304,15 @@ def batch(
         None, "--max-cost-usd",
         help="Hard cap on this run's cumulative API spend. Halts before the "
              "call that would breach it.",
+    ),
+    backend_override: Optional[str] = typer.Option(
+        None, "--backend",
+        help="Override the backend locked at intake for this run.",
+    ),
+    live: bool = typer.Option(
+        False, "--live",
+        help="Permit a PAID backend to make real API calls. Required for "
+             "--backend fal, alongside a non-empty FAL_KEY.",
     ),
     wait_for_canary: bool = typer.Option(
         False, "--wait-for-canary",
@@ -291,6 +333,17 @@ def batch(
     except (FileNotFoundError, ValueError) as exc:
         _fail(str(exc))
 
+    if backend_override and backend_override != run.manifest.backend:
+        run.logger.info(
+            "batch.backend_override",
+            locked_at_intake=run.manifest.backend, using=backend_override,
+        )
+        run.manifest.backend = backend_override
+        run.save()
+
+    # FIREWALL 0: intent and credentials, before anything touches the disk.
+    _guard_paid_backend(run.manifest.backend, live=live)
+
     # FIREWALL 1: no approved canary verdict -> no spend. Checked before the
     # backend is even constructed, and long before the ledger authorises a call.
     verdict = _require_canary(run, weights, wait=wait_for_canary)
@@ -298,7 +351,7 @@ def batch(
     profile = styles.profile(run.manifest.style)
     prompt = _effective_prompt(run, profile)
     try:
-        backend = get_backend(run.manifest.backend)
+        backend = get_backend(run.manifest.backend, live=live)
     except (NotImplementedError, ValueError) as exc:
         _fail(str(exc))
 

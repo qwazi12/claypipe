@@ -148,3 +148,72 @@ def test_cli_batch_refuses_an_unreadable_verdict(run_path: Path) -> None:
     result = run_batch(run_path)
     assert result.exit_code == 1
     assert "canary gate" in result.output and "not valid JSON" in result.output
+
+
+# --------------------------------------------------------------------------
+# T4 — two locks in front of any paid backend
+# --------------------------------------------------------------------------
+
+def test_cli_batch_refuses_fal_without_live_flag(run_path: Path, monkeypatch) -> None:
+    """DEFENDS: an accidental paid run. --live is the deliberate act.
+
+    Proven with FAL_KEY PRESENT, so the refusal is attributable to the missing
+    flag alone and not to absent credentials.
+    """
+    monkeypatch.setenv("FAL_KEY", "key-is-present-but-irrelevant-here")
+    write_verdict(run_path, approved=True)
+
+    result = run_batch(run_path, "--backend", "fal")
+
+    assert result.exit_code == 1
+    assert "Refusing to use paid backend" in result.output
+    assert restyled_count(run_path) == 0
+
+
+def test_cli_batch_refuses_fal_with_live_but_no_env(run_path: Path, monkeypatch) -> None:
+    """DEFENDS: Rule 5 — fail fast and name the missing variable.
+
+    Deliberate intent without the credential must fail at startup, not at the
+    first call.
+    """
+    monkeypatch.setenv("FAL_KEY", "   ")  # whitespace is not a key
+    write_verdict(run_path, approved=True)
+
+    result = run_batch(run_path, "--backend", "fal", "--live")
+
+    assert result.exit_code == 1
+    assert "FAL_KEY" in result.output
+    assert restyled_count(run_path) == 0
+
+
+def test_paid_guard_runs_before_the_canary_gate(run_path: Path, monkeypatch) -> None:
+    """The cheapest, most local check reports first.
+
+    With NO canary verdict and no --live, both gates would refuse. The paid
+    guard is the more actionable message, and it touches no files.
+    """
+    monkeypatch.delenv("FAL_KEY", raising=False)
+    result = run_batch(run_path, "--backend", "fal")
+    assert result.exit_code == 1
+    assert "Refusing to use paid backend" in result.output
+    assert "canary gate" not in result.output
+
+
+def test_free_backend_needs_neither_live_nor_a_key(run_path: Path, monkeypatch) -> None:
+    """DEFENDS: the guard leaking onto the offline path it must not gate."""
+    monkeypatch.delenv("FAL_KEY", raising=False)
+    write_verdict(run_path, approved=True)
+
+    result = run_batch(run_path)
+    assert result.exit_code == 0, result.output
+    assert restyled_count(run_path) == 60
+
+
+def test_backend_override_is_recorded_in_the_manifest(run_path: Path, monkeypatch) -> None:
+    """An override changes what the run IS, so the run must say so."""
+    monkeypatch.setenv("FAL_KEY", "present")
+    write_verdict(run_path, approved=True)
+    run_batch(run_path, "--backend", "fal")  # refused for want of --live
+
+    manifest = json.loads((run_path / "run.json").read_text())
+    assert manifest["backend"] == "fal", "the override was not persisted"
