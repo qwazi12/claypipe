@@ -312,7 +312,10 @@ def batch(
         _fail(f"source video has moved or been deleted: {source}")
 
     try:
-        extracted = extract_frames(source, run.paths.source_frames, run.manifest.fps, run.logger)
+        extracted = extract_frames(
+            source, run.paths.source_frames, run.manifest.fps, run.logger,
+            incident_dir=run.paths.root,
+        )
         extract_audio(source, run.paths.audio, run.logger)
     except Exception as exc:
         run.logger.error("batch.failed", error=str(exc))
