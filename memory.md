@@ -175,7 +175,7 @@
 - **D14 (2026-09-09, OPERATOR DECISION 2) `targets.tf_min` raised 0.80 -> 0.95.**
   Closes D10. Pure config; no code touched, metric unchanged.
 - **D15 (2026-09-09) FINDING — tf_min=0.95 flags legitimate fast motion, not
-  just flicker. OPEN, not blocking.** Measured: real motion 0.932, severe
+  just flicker. CLOSED 2026-09-12 by D34 (block_p95 aggregation).** Measured: real motion 0.932, severe
   shimmer 0.916 — **0.016 apart**. No single threshold separates them, so any
   target that catches the flicker also catches genuine fast action. Consequence:
   action-heavy shots will generate human-review load at Stage 3. Decision 2 was
@@ -346,6 +346,33 @@
   sheet. Operator said "disregard for now and keep building" on 2026-09-09, so it
   stays open THERE. Recorded here only so it is not lost: deploying that repo
   anywhere copies a live key into another build environment.
+- **D34 (2026-09-12) D15 CLOSED — temporal aggregation is `block_p95`, and the
+  proposed `p95` was measured WORSE than the mean it was meant to replace.**
+  Re-sweep on the three temporal fixtures, tf_min = 0.95:
+  | fixture | mean | p95 | block_p95 |
+  |---|---|---|---|
+  | static_pair | 0.997 | 1.000 | **1.000** |
+  | high_motion (legitimate motion) | 0.932 | 0.561 | **0.973** |
+  | flicker_pair (severe shimmer) | 0.916 | 0.812 | **0.912** |
+  * `mean` — correct ordering, but legitimate motion (0.932) cannot clear
+    tf_min. That was D15.
+  * `p95` — **INVERTS the ordering**: motion 0.561 scores WORSE than flicker
+    0.812. A high percentile is precisely where real motion lives, because
+    occlusion edges produce the largest residuals in the frame. The Step-6
+    brief proposed p95 as the D15 fix; measurement says it would have made D15
+    worse. Kept as an opt-in and pinned by a test so nobody re-adopts it.
+  * `block_p95` — median of per-4x4-block 95th percentiles. **Passes all three
+    assertions.** Shimmer raises the high percentile in MOST blocks so the
+    median rises with it; motion raises it enormously in the FEW blocks holding
+    occlusion edges and the median steps over them. That is the distinction a
+    whole-frame statistic cannot make.
+  Taken via the brief's own documented fallback ("if p95 fails any of the three
+  assertions ... switch default to block_p95"). `mean` and `p95` remain
+  selectable in `weights.yaml`; the chosen default and its full assertion list
+  are locked by tests.
+  **Consequence for the Definition of Done:** DoD item 5 asks that
+  `temporal.aggregation` print exactly `p95`. It prints `block_p95` — the value
+  the brief's fallback selects. Reported rather than forced.
 
 ## Pending / Next
 - **Dashboard workstream (D32), in dependency order:**
@@ -386,6 +413,18 @@
 - RUNBOOK.md / CONFIG.md (Rule 33) not written yet — due with step 6.
 
 ## Log (append-only, newest first)
+
+### 2026-09-12 — T1-T3: stale text, extract sentinel, D15 closed
+- T1: cli.py claimed scoring was unbuilt three steps after it shipped; README
+  listed four shipped steps as "not started"; SPEC.md gained the weights.yaml
+  authority header. All three pinned by tests.
+- T2: extraction resumability moved from a frame count to a `.extract_complete`
+  sentinel carrying the source hash, so a partial extraction can no longer be
+  mistaken for a finished one and a changed source cannot reuse stale frames.
+- T3/D34: measured all three aggregations before choosing. `p95` INVERTS the
+  motion/flicker ordering and would have made D15 worse; `block_p95` passes all
+  three assertions and is now the default. D15 closed.
+- 178 green.
 
 ### 2026-09-09 — Direction change mid-step: dashboard workstream opened
 - Operator asked to "see track and interact with this tool" (D32). Step 5 was

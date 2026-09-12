@@ -308,17 +308,12 @@ def identity_similarity(
 # Metric 4 — temporal fidelity (flicker)
 # --------------------------------------------------------------------------
 
-def temporal_fidelity(
+def motion_compensated_residual(
     previous_restyled: np.ndarray,
     current_restyled: np.ndarray,
     cfg: TemporalConfig,
-) -> float:
-    """1 - normalised optical-flow-warped difference between consecutive frames.
-
-    Real motion is cancelled by warping the previous frame along the estimated
-    flow before differencing, so what remains is flicker: the restyle changing
-    its mind about a surface that did not actually change.
-    """
+) -> np.ndarray:
+    """Per-pixel |warped(prev) - curr| after cancelling real motion with flow."""
     import cv2
 
     _require_same_shape(previous_restyled, current_restyled, "TF")
@@ -335,9 +330,56 @@ def temporal_fidelity(
     map_x = (grid_x + flow[..., 0]).astype(np.float32)
     map_y = (grid_y + flow[..., 1]).astype(np.float32)
     warped = cv2.remap(prev_gray, map_x, map_y, cv2.INTER_LINEAR, borderMode=cv2.BORDER_REPLICATE)
+    return np.abs(warped.astype(np.float32) - curr_gray.astype(np.float32))
 
-    diff = np.abs(warped.astype(np.float32) - curr_gray.astype(np.float32)).mean() / 255.0
-    return float(np.clip(1.0 - diff, 0.0, 1.0))
+
+def _block_p95(residual: np.ndarray, block: int) -> float:
+    """Median of per-block 95th percentiles.
+
+    This is what actually separates flicker from motion (D34). Shimmer raises
+    the high percentile in MOST blocks, so the median rises with it. Real motion
+    raises it enormously in the FEW blocks containing occlusion edges, and the
+    median steps straight over them. A whole-frame p95 cannot make that
+    distinction — it reports the occlusion edges and nothing else.
+    """
+    h, w = residual.shape
+    h -= h % block
+    w -= w % block
+    if h == 0 or w == 0:  # frame smaller than one block
+        return float(np.percentile(residual, 95))
+    tiles = (
+        residual[:h, :w]
+        .reshape(h // block, block, w // block, block)
+        .transpose(0, 2, 1, 3)
+        .reshape(-1, block * block)
+    )
+    return float(np.median(np.percentile(tiles, 95, axis=1)))
+
+
+def temporal_fidelity(
+    previous_restyled: np.ndarray,
+    current_restyled: np.ndarray,
+    cfg: TemporalConfig,
+) -> float:
+    """1 - normalised motion-compensated difference between consecutive frames.
+
+    Real motion is cancelled by warping the previous frame along the estimated
+    flow before differencing, so what remains is flicker: the restyle changing
+    its mind about a surface that did not actually change.
+
+    HOW the residual is reduced to one number is configurable and matters more
+    than it looks — see `temporal.aggregation` in weights.yaml and memory.md D34.
+    """
+    residual = motion_compensated_residual(previous_restyled, current_restyled, cfg)
+
+    if cfg.aggregation == "block_p95":
+        statistic = _block_p95(residual, cfg.block_size)
+    elif cfg.aggregation == "p95":
+        statistic = float(np.percentile(residual, 95))
+    else:
+        statistic = float(residual.mean())
+
+    return float(np.clip(1.0 - statistic / 255.0, 0.0, 1.0))
 
 
 # The first frame of a shot has no predecessor to compare against. It is scored

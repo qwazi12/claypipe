@@ -75,10 +75,12 @@ BANDS: dict[str, dict[str, tuple[float, float]]] = {
     "structure_destroyed": {"ssim": (0.760, 0.880), "lpips_edges": (0.120, 0.250), "identity": (0.580, 0.710)},
     "wrong_scene":         {"ssim": (0.550, 0.690), "lpips_edges": (0.500, 0.800), "identity": (0.570, 0.700)},
 }
+# Under the block_p95 aggregation chosen in D34. Recalibrated from measurement,
+# not carried over from the mean-based numbers these replace.
 TEMPORAL_BANDS: dict[str, tuple[float, float]] = {
     "static_pair":  (0.990, 1.000),
-    "high_motion":  (0.900, 0.960),
-    "flicker_pair": (0.880, 0.945),
+    "high_motion":  (0.955, 0.990),
+    "flicker_pair": (0.870, 0.940),
 }
 # Verdicts under DECISION 1 (PASS = F >= 0.75 AND all component targets met)
 # and DECISION 2 (tf_min 0.80 -> 0.95). Three fixtures moved PASS -> BORDERLINE
@@ -442,18 +444,68 @@ def test_decision2_tf_target_is_now_expressive(cfg) -> None:
     assert flicker < cfg.targets.tf_min, "severe shimmer must breach it"
 
 
-def test_finding_d15_tf_target_also_flags_legitimate_fast_motion(cfg) -> None:
-    """FINDING (D15), OPEN: tf_min=0.95 does not separate motion from flicker.
+# --------------------------------------------------------------------------
+# D34 — temporal aggregation. Closes D15.
+# --------------------------------------------------------------------------
 
-    Real motion scores 0.932 and severe flicker 0.916 — 0.016 apart. Any
-    threshold that catches the flicker also catches the motion, so fast action
-    shots will generate human-review load. Decision 2 was applied as directed;
-    this records the consequence rather than quietly absorbing it.
+def test_temporal_aggregation_default_is_p95_family(cfg) -> None:
+    """DEFENDS: the aggregation silently reverting to the whole-frame mean.
+
+    The mean is what made D15 unfixable — it saturates near 1, so legitimate
+    fast motion could not clear tf_min.
     """
+    assert cfg.temporal.aggregation == "block_p95"
+    assert cfg.temporal.block_size == 4
+
+
+def test_p95_preserves_static_gt_motion_gt_flicker(cfg) -> None:
+    """DEFENDS: the ordering the temporal metric exists to produce."""
+    static = S.temporal_fidelity(*consecutive("static_pair"), cfg.temporal)
     motion = S.temporal_fidelity(*consecutive("high_motion"), cfg.temporal)
     flicker = S.temporal_fidelity(*consecutive("flicker_pair"), cfg.temporal)
-
-    assert motion < cfg.targets.tf_min, "legitimate motion is flagged"
-    assert abs(motion - flicker) < 0.05, (
-        "motion and flicker are too close for one threshold to separate them"
+    assert static > motion > flicker, (
+        f"ordering broken: static={static:.3f} motion={motion:.3f} "
+        f"flicker={flicker:.3f}"
     )
+
+
+def test_p95_does_not_flag_legitimate_fast_motion(cfg) -> None:
+    """DEFENDS: D15 — a fast action shot generating human-review load.
+
+    This is the assertion the whole of D34 exists to satisfy.
+    """
+    motion = S.temporal_fidelity(*consecutive("high_motion"), cfg.temporal)
+    assert motion >= cfg.targets.tf_min, (
+        f"legitimate motion scored {motion:.3f}, below tf_min "
+        f"{cfg.targets.tf_min} — D15 has regressed"
+    )
+
+
+def test_p95_catches_severe_flicker(cfg) -> None:
+    """DEFENDS: shimmer sailing through the target meant to catch it."""
+    flicker = S.temporal_fidelity(*consecutive("flicker_pair"), cfg.temporal)
+    assert flicker < cfg.targets.tf_min
+
+
+def test_whole_frame_p95_is_rejected_as_the_default(cfg) -> None:
+    """DEFENDS: D34's actual finding, so nobody 'simplifies' back to it.
+
+    A whole-frame p95 reports the few blocks holding occlusion edges and
+    nothing else, so it ranks real MOTION as worse than flicker — the exact
+    inversion the metric must not make. block_p95's median steps over those
+    blocks; the plain percentile cannot.
+    """
+    naive = cfg.temporal.model_copy(update={"aggregation": "p95"})
+    motion = S.temporal_fidelity(*consecutive("high_motion"), naive)
+    flicker = S.temporal_fidelity(*consecutive("flicker_pair"), naive)
+    assert motion < flicker, (
+        "whole-frame p95 no longer inverts the ordering; re-evaluate D34 "
+        "before changing the default"
+    )
+
+
+def test_mean_aggregation_still_available_and_still_flags_motion(cfg) -> None:
+    """The pre-D34 behaviour is kept as an opt-in, with its flaw documented."""
+    legacy = cfg.temporal.model_copy(update={"aggregation": "mean"})
+    motion = S.temporal_fidelity(*consecutive("high_motion"), legacy)
+    assert motion < cfg.targets.tf_min, "this is why the mean was not kept"

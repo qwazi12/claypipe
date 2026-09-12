@@ -73,6 +73,16 @@ canny:
 # Farneback optical flow, for temporal fidelity between consecutive restyled
 # frames. Defaults are OpenCV's documented values.
 temporal:
+  # How the motion-compensated residual is reduced to one number (D34).
+  #   block_p95  median of per-4x4-block 95th percentiles. THE DEFAULT.
+  #   p95        95th percentile of the whole residual. Opt-in only — measured
+  #              WORSE than mean: real motion's occlusion edges live exactly at
+  #              the high percentile, so high_motion scored 0.561 against
+  #              flicker's 0.812, inverting the ordering the metric exists for.
+  #   mean       whole-frame mean. The pre-D34 behaviour; saturates near 1 and
+  #              cannot clear tf_min on legitimate fast motion (that was D15).
+  aggregation: "block_p95"
+  block_size: 4
   pyr_scale: 0.5
   levels: 3
   winsize: 15

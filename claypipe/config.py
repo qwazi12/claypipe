@@ -7,7 +7,7 @@ malformed: a bad config is a startup crash with the offending field named.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Literal
 
 import yaml
 from pydantic import BaseModel, Field, ValidationError, field_validator, model_validator
@@ -161,6 +161,8 @@ class CannyConfig(BaseModel):
 class TemporalConfig(BaseModel):
     model_config = {"extra": "forbid"}
 
+    aggregation: Literal["block_p95", "p95", "mean"] = "block_p95"
+    block_size: int = Field(default=4, gt=1)
     pyr_scale: float = Field(gt=0.0, lt=1.0)
     levels: int = Field(gt=0)
     winsize: int = Field(gt=0)
