@@ -19,7 +19,7 @@ from .config import ConfigError, load_all
 from .pipeline import assemble as assemble_stage
 from .pipeline import qccard
 from .pipeline.extract import count_frames, extract_audio, extract_frames, frame_paths
-from .pipeline import captions, propagate, shots
+from .pipeline import burnin, captions, propagate, shots
 from .pipeline.layout import LayoutError, source_aspect_of
 from .pipeline.restyle import (
     ChunkLengthError,
@@ -78,6 +78,12 @@ def intake(
     title: Optional[str] = typer.Option(None, "--title", help="Header bar text (default: filename)"),
     fps: Optional[int] = typer.Option(None, "--fps", help="Extraction fps (default: styles.yaml)"),
     backend: str = typer.Option("dummy", "--backend", help="Restyle backend: dummy | fal"),
+    allow_burned_captions: bool = typer.Option(
+        False, "--allow-burned-captions",
+        help="Acknowledge that the source carries burned-in text and proceed. "
+             "Intake never blocks on it either way — this only records that the "
+             "operator saw the warning before spending.",
+    ),
     mode: str = typer.Option(
         "surface", "--mode",
         help="Track: surface (per-frame img2img, geometry preserved) or "
@@ -142,6 +148,47 @@ def intake(
     if ref:
         run.manifest.reference_images = [str(p.resolve()) for p in ref]
         run.save()
+    # T9b: burned-in text is detected ONCE, here, before any spend. A source
+    # that already carries subtitles breaks the format three ways — the text
+    # appears in the original panel, gets RESTYLED into the comparison panel as
+    # clay-textured glyphs, and is then duplicated by T12's own caption track.
+    # None of that is visible until the money is gone.
+    try:
+        burn_in = burnin.detect_burned_in_captions(video)
+    except burnin.BurnInError as exc:
+        run.logger.warn("intake.burnin.failed", error=str(exc))
+        burn_in = None
+
+    if burn_in is not None:
+        run.manifest.burned_in_text = burn_in.as_dict()
+        run.manifest.burned_in_acknowledged = allow_burned_captions
+        run.save()
+        if burn_in.detected:
+            run.logger.warn(
+                "intake.burned_in_text",
+                acknowledged=allow_burned_captions,
+                consequence=(
+                    "this text will appear in the original panel, be RESTYLED "
+                    "into the comparison panel, and be duplicated by the T12 "
+                    "caption track. ClayPipe does not remove it."
+                ),
+                **burn_in.as_dict(),
+            )
+            typer.secho(f"WARNING: {burn_in.describe()}", fg=typer.colors.YELLOW, err=True)
+            typer.secho(
+                "  -> it will be restyled into the top panel as textured glyphs, "
+                "and T12 captions would duplicate it.\n"
+                "  -> ClayPipe does not remove burned-in text. Judge the canary "
+                "on character and surface, not on the text.",
+                fg=typer.colors.YELLOW, err=True,
+            )
+            if not allow_burned_captions:
+                typer.secho(
+                    "  -> pass --allow-burned-captions to record that you saw "
+                    "this before spending.",
+                    fg=typer.colors.YELLOW, err=True,
+                )
+
     run.logger.info(
         "intake",
         source=str(video),
@@ -1542,6 +1589,18 @@ def status(
         if m.reference_origin != "canary":
             references += "  [F1 RISK: approve a canary to re-point them]"
     typer.echo(f"identity   {references}")
+    burn = m.burned_in_text
+    if burn is None:
+        typer.echo("burned-in  not checked (run predates T9b)")
+    elif burn.get("detected"):
+        ack = "acknowledged" if m.burned_in_acknowledged else "NOT acknowledged"
+        typer.echo(
+            f"burned-in  {burn['kind']} at rows {burn['band_top']}-"
+            f"{burn['band_bottom']} of {burn['frame_height']} "
+            f"({burn['band_centre_fraction'] * 100:.0f}% down) — {ack}"
+        )
+    else:
+        typer.echo("burned-in  none detected")
     if run.paths.shot_plan.is_file():
         try:
             plan = shots.ShotPlan.read(run.paths.shot_plan)

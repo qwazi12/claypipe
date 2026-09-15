@@ -75,6 +75,11 @@ class RunManifest(BaseModel):
     # satisfied by editing a URL is not a gate (D17).
     canary_kind: str | None = None
     canary_clip_seconds: float | None = None
+    # T9b: the source already carries burned-in text. Recorded so a later
+    # reviewer can tell a garbled top panel (the restyle rendering subtitle
+    # glyphs) from a backend failure. Advisory — it never blocks a run.
+    burned_in_text: dict | None = None
+    burned_in_acknowledged: bool = False
     # T14/A3: WHICH KIND of canary this run's verdict covers.
     #   "frames" — three stills. Sufficient for Track A.
     #   "clip"   — a short trim. REQUIRED for Track C, because three stills
@@ -84,6 +89,11 @@ class RunManifest(BaseModel):
     # only in the verdict, so it cannot be forged through the submission URL.
     canary_kind: str | None = None
     canary_clip_seconds: float | None = None
+    # T9b: the source already carries burned-in text. Recorded so a later
+    # reviewer can tell a garbled top panel (the restyle rendering subtitle
+    # glyphs) from a backend failure. Advisory — it never blocks a run.
+    burned_in_text: dict | None = None
+    burned_in_acknowledged: bool = False
     reference_images: list[str] = Field(default_factory=list)
     # T10/F1: WHERE the identity references came from, which decides whether
     # the ID metric is measuring anything useful.
