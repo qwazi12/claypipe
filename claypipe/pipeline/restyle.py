@@ -132,8 +132,11 @@ class DummyClipBackend:
     """
 
     name = "dummy_clip"
+    # Mirrors Wan VACE's real schema, verified on fal 2026-09-15: num_frames
+    # "must be between 81 to 241 (inclusive)", and "video seconds are
+    # calculated at 16 frames per second".
     min_chunk_frames = 81
-    max_chunk_frames = 240
+    max_chunk_frames = 241
     native_fps = 16
 
     def cost_per_video_second_usd(self) -> float:

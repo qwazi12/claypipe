@@ -335,7 +335,9 @@ def test_the_dummy_clip_backend_imitates_vaces_awkward_properties():
     would let the pipeline pass tests it should fail — those two facts are what
     force the duration invariant (A2/T17)."""
     backend = DummyClipBackend()
-    assert (backend.min_chunk_frames, backend.max_chunk_frames) == (81, 240)
+    # Mirrors Wan VACE's real schema, verified on fal 2026-09-15: num_frames
+    # "must be between 81 to 241 (inclusive)".
+    assert (backend.min_chunk_frames, backend.max_chunk_frames) == (81, 241)
     assert backend.native_fps == 16
     assert backend.native_fps != 12, "must not match the pipeline's fps"
 

@@ -1,6 +1,10 @@
 # MEMORY — ClayPipe
 
 ## Current State
+- **T16 IS NOW SPENDABLE, AND UNSPENT. Awaiting the operator.** Everything that
+  blocked it is done and free: T9a, T9b, T18a, RUNBOOK.md, CONFIG.md. All fal
+  prices verified against the live model pages. See D53 for the budget
+  correction and the two blockers that are NOT code.
 - **MASTER_PLAN.md is now the single build plan.** It supersedes the three
   working-note briefs. Scope: Track A (per-frame surface restyle) + Track C
   (video-native resynthesis). Track B (3D character replacement) is OUT OF
@@ -12,7 +16,7 @@
 - **PHASE 2 PARTIALLY COMPLETE: T13, T14, T15, T18 done.** T16 (the bake-off)
   and T19 (Modal) are BLOCKED on operator action; T17's code is local but needs
   a real Track C output to verify against.
-- pytest **372 passed / 3 skipped / 0 failed** (from 190 at day start). The 3
+- pytest **440 passed / 5 skipped / 0 failed**. The 3
   skips are real-footage measurements that skip unless
   CLAYPIPE_REFERENCE_CLIP_A/B point at the reference clips.
 - **THE FULL PIPELINE RUNS END TO END ON A REAL 60-SECOND CLIP** with every
@@ -728,8 +732,190 @@
   **Lesson worth keeping: the end-to-end visual check is part of the work, not
   a formality. No unit test caught this and the assertion actively passed it.**
 
+- **D53 (2026-09-15) THE T16 BAKE-OFF, VERIFIED AGAINST fal's LIVE MODEL PAGES.
+  THE BUDGET IS WRONG AND ONE CANDIDATE IS UNBUYABLE.** Every price below was
+  read off fal's own model page on 2026-09-15, and each `weights.yaml` entry
+  names the endpoint it came from so a future session re-checks one line
+  instead of re-researching the table.
+  | Candidate | fal endpoint | Price | Unit | Canary |
+  |---|---|---|---|---|
+  | Kontext [pro] | `fal-ai/flux-pro/kontext` | $0.04 | image | $0.1200 |
+  | Kontext [dev] | `fal-ai/flux-kontext/dev` | $0.025 | MP, **rounds up** | $0.0750 |
+  | Qwen Image Edit | `fal-ai/qwen-image-edit` | $0.03 | MP | $0.0900 |
+  | Flux gen + CN + LoRA | `fal-ai/flux-general/image-to-image` | **$0.075** | MP, rounds up | **$0.2250** |
+  | SDXL + ControlNet | `fal-ai/fast-sdxl-controlnet-canny/image-to-image` | **per COMPUTE SECOND** | UNSUPPORTED | — |
+  | Wan VACE 480p | `fal-ai/wan-vace-14b` | $0.04 | video_second | **$0.2025** |
+  | Runway Aleph | deferred | $0.18 | video_second | $0.9113 |
+  **FOUR FINDINGS, in order of how much they change things:**
+  1. **`fal` WAS UNDER-PRICED IN OUR OWN CONFIG (0.035 vs the real 0.04), and
+     that would have refused every real call.** The configured estimate is a
+     CEILING (`FalBackend.assert_affordable`), so a price below the true one
+     makes the firewall reject the endpoint's quote. Fixed. This is the single
+     most useful thing the verification caught.
+  2. **SDXL + ControlNet on fal is billed PER COMPUTE SECOND — a fourth unit
+     T15 does not implement, and CANNOT implement honestly.** The ledger
+     authorises BEFORE the call by design; a compute-second charge is unknown
+     until after it. So it can be capped but never pre-authorised. It is
+     therefore refused as unpriced, which is the CORRECT outcome, not a gap to
+     paper over. The SDXL candidate is consequently **untestable on fal**, for
+     a different reason than SD1.5 is.
+  3. **The LoRA candidate costs 7.5x what the brief assumed.**
+     `fal-ai/flux-general/image-to-image` is the ONLY fal endpoint taking both
+     `controlnets` and `loras` (by URL, confirmed: "URL or the path to the LoRA
+     weights"), so it is the sole way to test structure-conditioning plus a
+     claymation LoRA together — but at $0.075/MP it is $0.225 for three frames,
+     not the ~$0.03 assumed. Note it is FLUX-based, so it needs a Flux clay
+     LoRA, not an SDXL one.
+  4. **The 5.06s VACE floor is CONFIRMED FROM THE SCHEMA**, not inferred:
+     num_frames "must be between 81 to 241 (inclusive). Default value: 81", and
+     "Video seconds are calculated at 16 frames per second". 81/16 = 5.0625s =
+     $0.2025. `DummyClipBackend` now mirrors 81-241 exactly (was 81-240).
+  **CORRECTED BUDGET.** The amendment's $0.53 cap does not cover the run it
+  describes. Buyable total with the LoRA candidate: **$0.7125**. Without it:
+  **$0.4875**, but then nothing tests a clay LoRA. Both numbers are below the
+  $10 balance either way; the cap is the operator's call, not a code decision.
+  **NOT CODE, AND STILL OPEN:**
+  - **B1 was NOT re-confirmed.** The first version of this session's brief said
+    "the key in `.env` is new, not the one disclosed in D36. Proceed." The
+    re-sent version has that line DELETED. Treated as unconfirmed rather than
+    assumed; T16 is a paid run and D36 is a disclosed-key incident.
+  - **A claymation LoRA has not been chosen.** The brief asks for one matching
+    the endpoint's base, and that base is FLUX, not SDXL.
+- **D54 (2026-09-15, T9a) THE LAYOUT HAS TWO BRANCHES, AND THE CUTOFF IS
+  DERIVED.** A square source makes two full-width panels 2*1080 + 72 = 2232px
+  against a 1920 canvas: the width-fit rule has no solution and quietly derives
+  a negative margin. Both reference clips were widescreen so this was never
+  exercised; the Young Sheldon clip (640x640, true square, confirmed by
+  cropdetect) is the first that hits it.
+      WIDTH-FIT   panels span the canvas, height follows the aspect (unchanged)
+      HEIGHT-FIT  panels fit the vertical space, width follows the aspect, and
+                  they are centred with background pillarboxing
+      cutoff = W / ((H - gap - 2*min_margin) / 2)  = 1.4362
+  `MIN_MARGIN_FRACTION = 0.09` (172px of 1920) is constrained from BOTH sides
+  and is not reverse-engineered from a desired cutoff: it must clear
+  MIN_HEADER_HEIGHT (96px legibility) and stay under the margins the reference
+  format actually uses (16.6% clip A, 20.6% clip B), so it binds only on
+  aspects those clips never covered. Both constraints are tests.
+  Verified on RENDERED PIXELS of the square clip: vertical 172/752/72/752/172,
+  horizontal content x=164-915 with exactly 164px background each side.
+  The branches meet CONTINUOUSLY — at the cutoff the height-fit panel is
+  exactly canvas width — so two clips differing by 0.01 of aspect do not jump
+  size. Asserted.
+  Height-fit deliberately does NOT stretch panels to canvas width; that naive
+  fix distorts every face while leaving a file that plays.
+- **D55 (2026-09-15, T9b) BURNED-IN TEXT IS DETECTED AT INTAKE, AND NEITHER THE
+  POSITION NOR THE DISCRIMINATOR IS THE OBVIOUS ONE.** Two wrong assumptions
+  were corrected by measurement:
+  1. **NOT the lower third.** The brief proposed looking there (where broadcast
+     subtitles live). The Sheldon band peaks at **row 327 of 640 — 51% down,
+     dead centre** — because short-form social captions are centred. A
+     lower-third detector reports that clip CLEAN. The band is now searched for
+     across the full height.
+  2. **PERSISTENCE IS THE WRONG DISCRIMINATOR and the first implementation got
+     it exactly backwards because of it.** Sheldon's caption rows score
+     0.29-0.33 persistence (captions change text, blink, shift with line
+     count); the reference clips' TikTok WATERMARK scores **0.89**, because a
+     watermark is pinned. So v1 missed the clip that has captions and fired on
+     the two that only have a watermark.
+  What works: **outlined-bright density** — bright fill with a DARK pixel within
+  three on the same row. Every legible overlay is drawn that way to survive any
+  background; a blown-out window is bright with nothing dark beside it. Unit
+  test: a synthetic glyph fires, a synthetic highlight does not.
+  Measured, all four correct: Sheldon FIRES as `captions` (rows 297-342/640, 50%
+  down, 52% of width); clip A FIRES as `watermark` (93% down, 11% of width);
+  clip B FIRES as `watermark` (74% down, 22% of width); synthetic testsrc quiet
+  (band spans 43% of height = picture content). Clips A and B are TRUE
+  positives — a watermark also gets restyled.
+  Also fixed: horizontal extent was measured with longest-CONTIGUOUS-run, but
+  glyphs have gaps between letters, so it reported 3px for a band spanning 62%
+  and misclassified every caption as a watermark. Extent (first lit column to
+  last) is correct. And it probes at 640px, not 320 — downscaling thins strokes
+  until the outline signal disappears.
+  ADVISORY, never a block. `--allow-burned-captions` records acknowledgement.
+  A clean source records `detected: false` WITH a reason, so "checked and
+  clean" and "never checked" stay distinguishable (Rule 40).
+- **D56 (2026-09-15, T18a) TF ON A PROPAGATED FRAME IS CIRCULAR, SO UNTIL NOW
+  PROPAGATION HAD NO DRIFT CHECK AT ALL.** The operator's diagnosis is sharper
+  than D51's and supersedes its explanation: it is not merely that "TF measures
+  how often a chain is interrupted". A propagated frame **is** a warp of its
+  predecessor along the optical flow, and `temporal_fidelity` scores a frame by
+  warping its predecessor along the optical flow and differencing. **The metric
+  and the generation method are the same operation.** TF measures its own
+  assumption, and scores well precisely because the frame was made by the
+  process doing the grading. Meanwhile T18 was already wired into `batch` and
+  already shipping a 5-12x spend reduction.
+  `propagate.score_drift` scores propagated frame N against SOURCE frame N on
+  SSIM and LPIPS-edges and **never touches the flow field** — there is a test
+  that patches `flow_between` and asserts zero calls, because inheriting the
+  flow would inherit the circularity. Another test DEMONSTRATES the
+  circularity: ten chained warps score TF > 0.97 while source-referenced SSIM
+  is materially lower.
+  Sampled (LPIPS is a forward pass per frame) and **stratified BY CHAIN DEPTH**,
+  because the question is "does drift grow with depth" and a uniform sample
+  under-represents the deep chains that are the entire risk. That stratification
+  is what makes T16's max_chain sweep answerable.
+  **Reported beside F, never inside it.** No calibrated threshold for
+  source-referenced drift exists until T16 measures one; inventing one would be
+  F4 with a new name. `null` means "did not propagate", not "drift zero".
+  **DUMMY NULL CONTROL** on the full 711-frame Sheldon clip (143 paid / 568
+  warped / 4.97x):
+      depth  0-3  n=15  SSIM 0.3659  LPIPS-e 0.4696
+      depth  4-7  n=20  SSIM 0.3252  LPIPS-e 0.4335
+      depth 8-11  n=20  SSIM 0.3573  LPIPS-e 0.4524
+      depth 12-15 n=5   SSIM 0.3101  LPIPS-e 0.4290
+  FLAT AND NON-MONOTONIC — LPIPS actually IMPROVES with depth (-0.041), which is
+  how you can tell it is noise, not drift. The expected NULL RESULT: the dummy's
+  flat posterised fields resample near-losslessly and cannot show the smear real
+  clay texture would suffer. **It proves the instrument works; it does not
+  validate propagation.** The CLI prints that caveat itself.
+  `max_chain` stays at 12. It must not move on dummy-backend evidence.
+- **D57 (2026-09-15) RUNBOOK.md AND CONFIG.md EXIST, AND A TEST NOW ENFORCES
+  RULE 33.** Saying "docs must match code" in a memory file did not stop
+  `status` carrying a stale caption line for a whole session, so
+  `tests/test_docs_match_code.py` checks the CLAIMS rather than the prose:
+  every `claypipe <cmd>` and `--flag` RUNBOOK names must resolve; every
+  `RunPaths` artefact must appear in its artefact table; every leaf key in both
+  YAML files, every priced backend and every style profile must appear in
+  CONFIG.md; CONFIG.md must not TABULATE the three geometry keys T9 retired
+  (listing them as settable would send an operator to set a value that now
+  crashes startup under `extra: forbid`); it must state the derived layout
+  cutoff computed FROM the code; and it must not be readable as saying resynth
+  is ready to spend.
+  It caught six real gaps in CONFIG.md on its first run (four Farneback
+  parameters, both `calibration_note` fields, a missing "NOT CALIBRATED"), and
+  then caught an undocumented backend one commit later when D53's prices landed.
+- **D58 (2026-09-15) TARGET_DNA `shots` IS NOW A MEASURED RANGE WITH
+  PROVENANCE, NOT A POINT VALUE — AND THE DETECTORS DISAGREE.** Three source
+  clips, all measured with PySceneDetect ContentDetector at the shipped
+  threshold 27.0, which is what the code actually uses:
+  | Clip | Frames | Duration | Cuts | Shots | Mean | Median | Shots/60s |
+  |---|---|---|---|---|---|---|---|
+  | A New Girl 576x1024 | 2094 | 87.28s | 41 | 42 | 2.08s | 1.62s | 28.9 |
+  | B Reacher 576x1024 | 1495 | 62.29s | 21 | 22 | 2.83s | 2.42s | 21.2 |
+  | C Young Sheldon 640x640 | 1421 | 59.35s | 25 | 26 | 2.28s | 2.21s | 26.3 |
+  Observed span **21-29 shots per 60s**, mean shot **2.1-2.8s**.
+  **This is NOT the brief's ~14-32 / 1.9-4.2s range, and the difference is
+  detector choice, not measurement error.** The brief's Sheldon figure (30 cuts,
+  31.4/60s, mean 1.91s) and its clip B figure (14 cuts) come from a coarse
+  mean-delta pass; PySceneDetect finds 25 and 21 respectively. The two
+  genuinely disagree on dark high-contrast action. **The range recorded here
+  uses the detector the pipeline ships**, because that is the one that will
+  produce the keyframe budget. Budget against clip A at 28.9/60s, the densest
+  under this detector.
+
 ## Pending / Next
-- **NEXT UP — T16, THE BAKE-OFF. It is the gating task for everything left.**
+- **T16 IS READY TO RUN AND NEEDS TWO OPERATOR DECISIONS FIRST (D53):**
+  1. **B1** — confirm `FAL_KEY` was rotated. The first version of this
+     session's brief confirmed it; the re-sent version deleted that line, so it
+     is treated as unconfirmed. D36 is a disclosed-key incident and T16 spends.
+  2. **The cap, and whether to buy the LoRA candidate.** $0.7125 with
+     `fal_flux_general`, $0.4875 without — but without it nothing tests a clay
+     LoRA. The amendment's $0.53 covers neither.
+  Also needed: a **FLUX** claymation LoRA URL (not SDXL — the only endpoint
+  with both ControlNet and LoRA is Flux-based).
+  Instrumentation is in place: `--drift-sample` is stratified by chain depth,
+  so the max_chain sweep is answerable from the same run.
+- (superseded) T16 was previously described as follows:
   ~$0.95 total. BLOCKED on the operator confirming B1 and authorising spend.
   It is the first real datum for: both mode target vectors (D49 — the resynth
   gate REFUSES paid runs until it lands), the T18 chain-length default (D51),
@@ -801,6 +987,25 @@
 - RUNBOOK.md / CONFIG.md (Rule 33) not written yet — due with step 6.
 
 ## Log (append-only, newest first)
+
+### 2026-09-15 — T9a, T9b, T18a, RUNBOOK+CONFIG; T16 verified but UNSPENT
+- **T9a** aspect-fit layout (D54). Commit `79142f0`. Square sources work.
+- **T9b** burned-in text detection (D55). Commit `2cd77be`. Two wrong
+  assumptions corrected by measurement; three bugs found while validating.
+- **T18a** independent drift comparator (D56). Commit `a7a4d30`. Propagation
+  had no drift check at all.
+- **RUNBOOK.md + CONFIG.md + Rule 33 enforcement test** (D57). Commit
+  `f8589c5`. The test caught six gaps in my own CONFIG.md immediately.
+- **T16 prices verified against fal's live model pages** (D53) and applied.
+  Found our own `fal` price under-stated at 0.035 vs the real 0.04, which would
+  have made the affordability ceiling refuse every real call.
+- **T16 NOT RUN. Stopped before spending, as instructed.** Two operator
+  decisions outstanding — see Pending/Next.
+- pytest 440 passed / 5 skipped / 0 failed. All commits pushed.
+- VERIFIED not assumed: square layout checked on rendered pixels; burn-in
+  detector calibrated against four clips; drift comparator proven not to touch
+  the flow field; every doc claim enforced by a test; every fal price read off
+  the vendor's own page.
 
 ### 2026-09-14 (cont.) — Phase 2 partial: T13, T14, T15, T18
 - **T13+T15** per-mode target vectors, two backend protocols, unit-aware

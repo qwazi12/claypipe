@@ -618,6 +618,11 @@ already exist.
   "format": "side_by_side_restyle_9x16",
   "reference_look": "lego_minifig",
   "target_look": "claymation",
+  "source_aspects_supported": {
+    "width_fit": ">= 1.436 — panels span the canvas",
+    "height_fit": "< 1.436 — panels fit the vertical space and are pillarboxed",
+    "cutoff_derivation": "W / ((H - gap - 2*min_margin) / 2), min_margin = 9% of H"
+  },
   "target_look_note": "reference clips are LEGO; the format, layout, cadence and method are the reference, the look is not",
   "canvas": { "width": 1080, "height": 1920, "fps_container": 24 },
   "restyle": {
@@ -661,12 +666,19 @@ already exist.
     "nondialogue_forms": ["[music cue]", "*sfx*", "*action*"]
   },
   "shots": {
-    "avg_length_seconds_dense": 2.08,
-    "avg_length_seconds_sparse": 4.15,
-    "median_length_seconds": [1.62, 0.46],
-    "shortest_observed_seconds": 0.21,
+    "shots_per_60s_range": [21.2, 28.9],
+    "mean_shot_seconds_range": [2.08, 2.83],
     "shots_per_60s_budget": 29,
-    "measurement": "measured 2026-09-14: 41 cuts / 42 shots in 87.28s (A), 14 cuts / 15 shots in 62.29s (B)"
+    "detector": "PySceneDetect ContentDetector, threshold 27.0 — the detector the pipeline ships",
+    "sources": [
+      { "clip": "New Girl", "size": "576x1024", "aspect": 1.78, "frames": 2094, "duration_s": 87.28,
+        "cuts": 41, "shots": 42, "mean_shot_s": 2.08, "median_shot_s": 1.62, "shots_per_60s": 28.9 },
+      { "clip": "Reacher", "size": "576x1024", "aspect": 2.01, "frames": 1495, "duration_s": 62.29,
+        "cuts": 21, "shots": 22, "mean_shot_s": 2.83, "median_shot_s": 2.42, "shots_per_60s": 21.2 },
+      { "clip": "Young Sheldon", "size": "640x640", "aspect": 1.00, "frames": 1421, "duration_s": 59.35,
+        "cuts": 25, "shots": 26, "mean_shot_s": 2.28, "median_shot_s": 2.21, "shots_per_60s": 26.3 }
+    ],
+    "detector_disagreement": "a coarse mean-delta pass finds 41 / 14 / 30 cuts on the same three clips. It agrees on A and disagrees materially on B and C, which are darker and higher-contrast. The range above uses the SHIPPED detector, because that is the one that produces the keyframe budget."
   },
   "audio": {
     "policy": "remux_untouched",

@@ -216,16 +216,38 @@ reports the occlusion edges and nothing else.
 A flat per-call number mis-prices most candidate backends. Each entry declares
 **what it charges for**.
 
-| Backend | Unit | Rate | Round up to MP |
-|---|---|---|---|
-| `dummy` | image | 0.0 | — |
-| `dummy_clip` | video_second | 0.0 | — |
-| `fal` | image | 0.035 | — |
-| `fal_kontext_dev` | megapixel | 0.025 | **yes** |
-| `fal_qwen_image_edit` | megapixel | 0.030 | **yes** |
-| `wan_vace_480p` | video_second | 0.04 | — |
-| `wan_vace_720p` | video_second | 0.08 | — |
-| `runway_aleph` | video_second | 0.18 | — |
+All non-dummy rates were read off fal's own model pages on **2026-09-15** and
+each entry in `weights.yaml` names the endpoint it came from, so a future
+session can re-check one line instead of re-researching the table.
+
+| Backend | fal endpoint | Unit | Rate | Round up to MP |
+|---|---|---|---|---|
+| `dummy` | — | image | 0.0 | — |
+| `dummy_clip` | — | video_second | 0.0 | — |
+| `fal` | `fal-ai/flux-pro/kontext` | image | 0.04 | n/a |
+| `fal_kontext_dev` | `fal-ai/flux-kontext/dev` | megapixel | 0.025 | **yes, confirmed wording** |
+| `fal_qwen_image_edit` | `fal-ai/qwen-image-edit` | megapixel | 0.030 | assumed (page silent) |
+| `fal_flux_general` | `fal-ai/flux-general/image-to-image` | megapixel | 0.075 | **yes, confirmed** |
+| `wan_vace_480p` | `fal-ai/wan-vace-14b` | video_second | 0.04 | — |
+| `wan_vace_580p` | `fal-ai/wan-vace-14b` | video_second | 0.06 | — |
+| `wan_vace_720p` | `fal-ai/wan-vace-14b` | video_second | 0.08 | — |
+| `runway_aleph` | (deferred) | video_second | 0.18 | — |
+
+`fal_flux_general` is the only fal endpoint accepting BOTH `controlnets` and
+`loras` (by URL), so it is the sole candidate able to test
+structure-conditioning together with a claymation LoRA. It is 3x Kontext
+[dev]'s rate.
+
+Wan VACE's `num_frames` is constrained to **81-241 inclusive** at 16fps native,
+so the smallest purchasable request is 81/16 = **5.0625 video-seconds =
+$0.2025**. `DummyClipBackend` mirrors those bounds deliberately.
+
+**A billing unit fal uses that this model does NOT support:** some endpoints
+(e.g. `fal-ai/fast-sdxl-controlnet-canny/image-to-image`) are priced **per
+compute second**. That cannot be authorised before the call, because the
+duration is unknown until after it — and the ledger authorises first by design.
+Such a backend is therefore refused as unpriced, which is the correct outcome
+rather than a gap to paper over. See memory.md D53.
 
 `estimated_usd_per_call` remains the per-IMAGE shorthand every existing caller
 uses; a backend appearing in both must agree, enforced by a validator.

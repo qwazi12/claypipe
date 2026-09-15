@@ -132,7 +132,11 @@ firewalls:
     # or per video-second needs a `pricing` entry below instead — see T15.
     estimated_usd_per_call:
       dummy: 0.0
-      fal: 0.035
+      # VERIFIED on fal's model page 2026-09-15: "Your request will cost $0.04
+      # per image." Was 0.035, which is UNDER the real price — and because the
+      # configured estimate is a CEILING (FalBackend.assert_affordable), an
+      # under-stated price makes the firewall refuse every real call.
+      fal: 0.04
 
     # T15/F3 — WHAT a backend charges for, not just how much. A flat per-call
     # number silently mis-prices two thirds of the candidate backends, giving a
@@ -158,27 +162,60 @@ firewalls:
       dummy_clip:
         unit: video_second
         rate: 0.0
-      # Flux Kontext [pro] via fal — the current default, and the most
-      # expensive realistic option at $28.80 per 60s clip at 12fps.
+      # --- T16 CANDIDATES, ALL PRICES VERIFIED ON fal's MODEL PAGES 2026-09-15.
+      # Each entry names the endpoint it was read from, so a future session can
+      # re-check one line rather than re-researching the table.
+
+      # fal-ai/flux-pro/kontext -- "Your request will cost $0.04 per image."
+      # The incumbent, and the most expensive realistic option: $28.80 per 60s
+      # clip at 12fps without propagation.
       fal:
         unit: image
-        rate: 0.035
-      # Track A per-megapixel candidates.
+        rate: 0.04
+
+      # fal-ai/flux-kontext/dev -- "$0.025 per megapixel" AND "Images are
+      # billed by rounding up to the nearest megapixel." The round-up is
+      # CONFIRMED wording, not an assumption.
       fal_kontext_dev:
         unit: megapixel
         rate: 0.025
         round_up_to_mp: true
+
+      # fal-ai/qwen-image-edit -- "$0.03 per megapixel". Rounding is NOT stated
+      # on the page; round_up_to_mp is left true as the conservative choice,
+      # because over-estimating a ceiling refuses a call while under-estimating
+      # one lets spend through unnoticed.
       fal_qwen_image_edit:
         unit: megapixel
         rate: 0.03
         round_up_to_mp: true
-      # Track C, per video-second. $2.40 for a 60s clip at 480p.
+
+      # fal-ai/flux-general/image-to-image -- "$0.075 per megapixel", rounds up.
+      # The ONLY fal endpoint that takes BOTH `controlnets` and `loras` (by
+      # URL), so it is the sole candidate that can test structure-conditioning
+      # plus a claymation LoRA together. Three times Kontext [dev]'s rate, which
+      # changes the bake-off budget — see memory.md D53.
+      fal_flux_general:
+        unit: megapixel
+        rate: 0.075
+        round_up_to_mp: true
+
+      # fal-ai/wan-vace-14b -- "$0.04 per video second for 480p", and "Video
+      # seconds are calculated at 16 frames per second". num_frames "must be
+      # between 81 to 241 (inclusive), default 81" -- so the purchasable floor
+      # is 81/16 = 5.0625s = $0.2025. CONFIRMED from the API schema.
       wan_vace_480p:
         unit: video_second
         rate: 0.04
+      wan_vace_580p:
+        unit: video_second
+        rate: 0.06
       wan_vace_720p:
         unit: video_second
         rate: 0.08
+
+      # Deferred for T16: a 5.06s canary is $0.91, more than everything else
+      # combined. Priced here so it is refusable rather than unpriced.
       runway_aleph:
         unit: video_second
         rate: 0.18
