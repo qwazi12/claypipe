@@ -284,6 +284,7 @@ def _build_scoring(run: Run, weights, backend, frame_count: int, profile):
         return None, None, []
 
     references = [Path(p) for p in run.manifest.reference_images]
+    _warn_on_source_origin_references(run, references)
     missing = [str(p) for p in references if not p.is_file()]
     if missing:
         _fail(
@@ -293,12 +294,21 @@ def _build_scoring(run: Run, weights, backend, frame_count: int, profile):
         )
     if not references:
         # Fail BEFORE the ledger authorises anything, rather than at frame 1
-        # with money already spent (memory.md D12 is still open for `logo`).
+        # with money already spent.
+        #
+        # D12 CLOSED by T10: "how does a style with no character (e.g. `logo`)
+        # score identity?" — against the canary frames the operator approved.
+        # No character is required and no special case is needed, which is why
+        # the error below points at the canary rather than at --ref.
         _fail(
             f"backend {backend.name!r} scores every frame, and identity scoring "
-            "needs at least one Stage-0 reference image (F weights ID at 0.20 "
-            "and the formula is fixed). Re-run intake with --ref <image> ... "
-            "before spending."
+            "needs at least one reference image (F weights ID at 0.20 and the "
+            "formula is fixed).\n"
+            "The reference SHOULD be an approved canary frame (T10/F1): run "
+            "`claypipe canary render`, approve it, and `claypipe canary submit` "
+            "locks the approved frames into refs/ automatically.\n"
+            "`intake --ref <image>` also works, but photoreal stills will miss "
+            "id_min on nearly every frame — see the F1 note in MASTER_PLAN."
         )
 
     try:
@@ -317,6 +327,57 @@ def _build_scoring(run: Run, weights, backend, frame_count: int, profile):
         retry_budget=controller.retry_budget,
     )
     return scorer, controller, loaded
+
+
+def _warn_on_source_origin_references(run: Run, references: list[Path]) -> None:
+    """T10/F1: say so, at startup, when ID is about to measure the wrong thing.
+
+    Warns rather than refuses. An operator may deliberately want to hold a clay
+    restyle to a photoreal reference — that is a legitimate (if expensive)
+    choice — but it must be a choice made with the consequence stated, not a
+    default discovered when the retry budget halts the run at frame ~107.
+    """
+    if run.manifest.reference_origin == "canary":
+        return
+
+    inside_source_frames = [
+        str(p) for p in references
+        if run.paths.source_frames.resolve() in p.resolve().parents
+    ]
+    run.logger.warn(
+        "batch.references.photoreal_risk",
+        origin=run.manifest.reference_origin,
+        count=len(references),
+        are_source_frames=inside_source_frames,
+        consequence=(
+            "identity is about to be scored against references that were not "
+            "produced by this style. CLIP cosine moves hard under total style "
+            "transfer, so a real restyle typically lands 0.65-0.82 against a "
+            "photoreal reference, misses targets.id_min (0.85) on nearly every "
+            "frame, and exhausts the retry budget mid-run (F1)."
+        ),
+        fix=(
+            "approve a canary first — `claypipe canary submit` locks the "
+            "approved restyled frames into refs/ and re-points ID at them. Do "
+            "NOT lower id_min instead: that trades a calibration bug for a "
+            "blind gate."
+        ),
+    )
+    typer.secho(
+        "WARNING: identity references came from `intake --ref`, not from an "
+        "approved canary. If they are photoreal, expect near-universal id_min "
+        "misses and a halted retry budget (F1). Approve a canary to re-point "
+        "them.",
+        fg=typer.colors.YELLOW, err=True,
+    )
+    if inside_source_frames:
+        typer.secho(
+            "WARNING: "
+            + str(len(inside_source_frames))
+            + " reference(s) are this run's own SOURCE frames. Identity will "
+            "measure how much the restyle failed to change the picture.",
+            fg=typer.colors.RED, err=True,
+        )
 
 
 # Backends that cost real money. Everything not listed here is free.
@@ -567,26 +628,182 @@ def _canary_frame_names(frames: list[Path], plan=None) -> tuple[list[Path], str]
     if not frames:
         return [], CANARY_CAPTION_STANDIN
     if len(frames) <= 3:
-        return frames, CANARY_CAPTION_STANDIN
+        # Three or fewer frames exist, so they ARE the selection — this is the
+        # normal state straight after `canary restyle`, which generated exactly
+        # the slots this function chose from the source frames. Saying
+        # "no shot plan" here would be wrong: the plan was already applied.
+        return frames, CANARY_CAPTION_PRESELECTED
 
+    first, middle = frames[0], frames[len(frames) // 2]
+    taken = {first.name, middle.name}
     third = frames[-1]
     caption = CANARY_CAPTION_STANDIN
+
     if plan is not None and plan.shots:
+        # The most-motion frame can LAND ON a slot already taken — on a clip
+        # with one shot, its midpoint IS the middle frame. Silently returning
+        # two frames for a three-frame canary would mean the operator approves
+        # less than they were shown a price for, so collisions fall through to
+        # the next distinct candidate inside the same busiest shot.
         try:
-            index = plan.most_motion_frame()
+            busiest = plan.most_motion_shot()
+            candidates = [
+                plan.most_motion_frame(),
+                busiest.end_frame,
+                busiest.start_frame,
+            ]
         except shots.ShotDetectionError:
-            index = None
-        if index is not None and 1 <= index <= len(frames):
-            shot = plan.shot_for_frame(index)
-            third = frames[index - 1]
+            candidates = []
+        for index in candidates:
+            if not (1 <= index <= len(frames)):
+                continue
+            candidate = frames[index - 1]
+            if candidate.name in taken:
+                continue
+            third = candidate
             caption = (
-                f"most-motion shot ({shot.index} of {len(plan.shots)}, "
-                f"{shot.duration_s:.2f}s, motion {shot.motion:.2f})"
+                f"most-motion shot ({busiest.index} of {len(plan.shots)}, "
+                f"{busiest.duration_s:.2f}s, motion {busiest.motion:.2f})"
             )
-    return [frames[0], frames[len(frames) // 2], third], caption
+            break
+
+    if third.name in taken:
+        # Last resort: any frame not already chosen, working backwards.
+        for candidate in reversed(frames):
+            if candidate.name not in taken:
+                third = candidate
+                caption = CANARY_CAPTION_STANDIN
+                break
+
+    chosen = [first, middle, third]
+    assert len({p.name for p in chosen}) == 3, (
+        f"canary selection collapsed to {[p.name for p in chosen]} — a "
+        "three-frame canary must show three distinct frames"
+    )
+    return chosen, caption
 
 
 CANARY_CAPTION_STANDIN = "last frame (stand-in: no shot plan for this run)"
+CANARY_CAPTION_PRESELECTED = "third slot, selected by `canary restyle`"
+
+
+@canary_app.command("restyle")
+def canary_restyle(
+    run_dir: Path = typer.Argument(..., help="Run directory or run id"),
+    runs_dir: Optional[Path] = typer.Option(None, "--runs-dir"),
+    backend_override: Optional[str] = typer.Option(
+        None, "--backend", help="Override the backend locked at intake."
+    ),
+    live: bool = typer.Option(
+        False, "--live",
+        help="Permit a PAID backend to make real API calls. Required for "
+             "--backend fal, alongside a non-empty FAL_KEY.",
+    ),
+    max_cost_usd: Optional[float] = typer.Option(
+        None, "--max-cost-usd", help="Hard cap on this stage's spend."
+    ),
+) -> None:
+    """STAGE 1 — restyle ONLY the canary frames, for review.
+
+    This is the stage the canary gate was always meant to sit behind. `batch`
+    refuses to start without an approved verdict (D17), and the verdict needs
+    frames to look at — so before T10a the only way to get them was to run the
+    full batch first, which paid for every frame of a look nobody had approved.
+
+    Three frames, through the ledger, at a cost the firewalls authorise
+    up front. On fal Kontext pro that is $0.12 instead of $28.80.
+
+    Deliberately UNSCORED. There are no identity references yet — the whole
+    point of T10 is that the approved output of THIS stage becomes them. A
+    score with no reference would be a number with a hole in it.
+    """
+    styles, weights, _ = _startup()
+    run, base = _load_run_for(run_dir, runs_dir, styles)
+
+    if backend_override and backend_override != run.manifest.backend:
+        run.logger.info(
+            "canary.restyle.backend_override",
+            locked_at_intake=run.manifest.backend, using=backend_override,
+        )
+        run.manifest.backend = backend_override
+        run.save()
+
+    _guard_paid_backend(run.manifest.backend, live=live)
+
+    profile = styles.profile(run.manifest.style)
+    prompt = _effective_prompt(run, profile)
+    try:
+        backend = get_backend(run.manifest.backend, live=live)
+    except (NotImplementedError, ValueError) as exc:
+        _fail(str(exc))
+
+    source = Path(run.manifest.source_path)
+    if not source.is_file():
+        _fail(f"source video has moved or been deleted: {source}")
+
+    try:
+        extracted = extract_frames(
+            source, run.paths.source_frames, run.manifest.fps, run.logger,
+            incident_dir=run.paths.root,
+        )
+        extract_audio(source, run.paths.audio, run.logger)
+    except Exception as exc:
+        run.logger.error("canary.restyle.failed", error=str(exc))
+        _fail(str(exc))
+
+    # The shot plan picks the most-motion slot (T11/D30) and supplies the
+    # per-shot seed, so a canary frame is generated with the SAME seed the full
+    # batch would use for it. Otherwise the operator approves a look the batch
+    # then does not reproduce.
+    plan = None
+    try:
+        plan = _build_shot_plan(run, extracted)
+    except shots.ShotDetectionError as exc:
+        run.logger.warn(
+            "canary.restyle.no_shot_plan",
+            error=str(exc),
+            consequence="third slot falls back to the last frame; seeds are per-clip",
+        )
+
+    sources = frame_paths(run.paths.source_frames)
+    chosen, third_caption = _canary_frame_names(sources, plan)
+    if not chosen:
+        _fail(f"no source frames in {run.paths.source_frames}")
+
+    ledger = SpendLedger(
+        paths=run.paths, project_dir=Path(base), cfg=weights.firewalls,
+        run_id=run.run_id, logger=run.logger, max_cost_usd_run=max_cost_usd,
+    )
+    run.paths.restyled_frames.mkdir(parents=True, exist_ok=True)
+    seed_for = plan.seed_for_frame if plan is not None else (lambda _i: 1000)
+    index_of = {p.name: i for i, p in enumerate(sources, start=1)}
+
+    written = []
+    for src in chosen:
+        dst = run.paths.restyled_frames / src.name
+        if dst.is_file():
+            run.logger.info("canary.restyle.skip", frame=src.name, reason="already restyled")
+            written.append(dst)
+            continue
+        seed = seed_for(index_of[src.name])
+        entry_id = ledger.authorize(frame=src.name, backend=backend.name, stage="canary")
+        backend.restyle(src, dst, prompt=prompt, strength=profile.strength, seed=seed)
+        ledger.reconcile(entry_id, backend.cost_per_frame_usd())
+        run.logger.info("canary.restyle.frame", frame=src.name, seed=seed)
+        written.append(dst)
+
+    run.logger.info(
+        "canary.restyle",
+        backend=backend.name, frames=len(written), third_slot=third_caption,
+        scored=False,
+        reason="no identity references exist yet — T10 makes the approved "
+               "output of this stage into them",
+        est_cost_usd=round(len(written) * backend.cost_per_frame_usd(), 4),
+    )
+    typer.echo(
+        f"{len(written)} canary frame(s) restyled with backend "
+        f"{backend.name!r} — now run `claypipe canary render`"
+    )
 
 
 @canary_app.command("render")
@@ -707,6 +924,79 @@ def canary_pack(
             )
 
 
+def _lock_canary_references(run: Run, verdict: dict) -> list[Path]:
+    """Copy the APPROVED canary frames into `refs/` and lock them (T10/F1).
+
+    This is the fix for the calibration bug that would have broken the first
+    paid run. `intake --ref` locks operator-supplied stills, which are
+    photoreal; a real clay restyle scored against a photograph lands ~0.65-0.82
+    on CLIP cosine, misses id_min 0.85 on nearly every frame, becomes
+    BORDERLINE (D13), retries at strength -0.10 (D18), and exhausts the 15%
+    retry budget around frame 107 — at which point the backend gets blamed for
+    a reference-selection mistake.
+
+    Pointing ID at the approved canary output changes the question from "does
+    this clay puppet resemble a photograph" to "is this the same clay character
+    the operator signed off". That is the question the metric exists for, and it
+    is why lowering id_min is the WRONG fix: it would trade a calibration bug
+    for a blind gate.
+
+    Also closes D12 (how does a style with no character, e.g. `logo`, score
+    identity?). The reference is whatever the canary approved — no character
+    needed, no special case.
+
+    Frames the operator individually marked `reject` are excluded: approving a
+    canary overall while flagging one frame means the other two are the
+    reference, not all three.
+    """
+    frames_verdicts = verdict.get("frames") or {}
+    rejected = {
+        name for name, fv in frames_verdicts.items()
+        if str((fv or {}).get("verdict", "")).lower() == "reject"
+    }
+
+    plan = None
+    if run.paths.shot_plan.is_file():
+        try:
+            plan = shots.ShotPlan.read(run.paths.shot_plan)
+        except Exception:
+            plan = None
+    chosen, _caption = _canary_frame_names(frame_paths(run.paths.restyled_frames), plan)
+
+    keep = [p for p in chosen if p.name not in rejected]
+    if not keep:
+        _fail(
+            "every canary frame was individually marked `reject`, so there is "
+            "nothing to lock as an identity reference. Reject the canary "
+            "outright and adjust the prompt instead."
+        )
+
+    run.paths.refs.mkdir(parents=True, exist_ok=True)
+    # Clear any previous lock: a re-submitted canary replaces its references
+    # rather than accumulating them, or the ID metric would average the
+    # approved look against a look that was superseded.
+    for stale in run.paths.refs.glob("ref_*.png"):
+        stale.unlink()
+
+    locked: list[Path] = []
+    for i, src in enumerate(keep, start=1):
+        dst = run.paths.refs / f"ref_{i:02d}_{src.name}"
+        dst.write_bytes(src.read_bytes())
+        locked.append(dst)
+
+    run.manifest.reference_images = [str(p.resolve()) for p in locked]
+    run.manifest.reference_origin = "canary"
+    run.save()
+    run.logger.info(
+        "canary.references.locked",
+        origin="canary",
+        count=len(locked),
+        excluded_rejected=sorted(rejected),
+        refs=[p.name for p in locked],
+    )
+    return locked
+
+
 @canary_app.command("submit")
 def canary_submit(
     run_dir: Path = typer.Argument(..., help="Run directory or run id"),
@@ -738,6 +1028,18 @@ def canary_submit(
         frames=len(verdict.get("frames", {})),
         reason=verdict.get("reason") or None,
     )
+
+    # T10/F1: an APPROVED canary is what the identity metric should measure
+    # against. Only a full approval locks references — an "adjust" verdict
+    # means the look is about to change, so locking it would lock the wrong
+    # target, and a rejection has nothing worth locking.
+    if verdict["approved"] is True:
+        locked = _lock_canary_references(run, verdict)
+        typer.secho(
+            f"locked {len(locked)} identity reference(s) from the approved "
+            f"canary into {run.paths.refs}",
+            fg=typer.colors.GREEN,
+        )
 
     approved = verdict["approved"]
     label = {True: "APPROVED", False: "REJECTED"}.get(approved, str(approved).upper())

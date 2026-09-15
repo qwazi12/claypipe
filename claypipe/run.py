@@ -59,6 +59,17 @@ class RunManifest(BaseModel):
     fps: int
     backend: str
     reference_images: list[str] = Field(default_factory=list)
+    # T10/F1: WHERE the identity references came from, which decides whether
+    # the ID metric is measuring anything useful.
+    #   "intake" — operator-supplied at `intake --ref`. Usually PHOTOREAL stills
+    #              of the character. Scoring a clay restyle against those asks
+    #              "does this clay puppet look like a photograph", and the answer
+    #              is legitimately no (~0.65-0.82), so id_min 0.85 misses on
+    #              nearly every frame and the retry budget halts the run.
+    #   "canary" — the restyled frames the operator APPROVED. The ID metric then
+    #              asks "is this the same clay character the operator signed
+    #              off", which is the question it exists for.
+    reference_origin: str = "intake"
     # Set by verdi.loaders.merge_prompt_override when a canary comes back
     # "adjust". Points AT the override file; the original style prompt in
     # styles.yaml is never touched.
@@ -105,6 +116,13 @@ class RunPaths:
     @property
     def final(self) -> Path:
         return self.root / "final_comparison.mp4"
+
+    @property
+    def refs(self) -> Path:
+        """Identity references for this run (T10). Populated from the APPROVED
+        canary frames, so they live inside the run rather than pointing at
+        operator files that may move."""
+        return self.root / "refs"
 
     @property
     def shot_plan(self) -> Path:

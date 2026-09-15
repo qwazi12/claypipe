@@ -357,3 +357,26 @@ def test_detector_reproduces_the_reference_cut_count(env_var, expected):
         f"{env_var}: detector found {plan.cuts} cuts, expected {cuts}+/-{tolerance}. "
         "Either the clip changed or PySceneDetect's default threshold moved."
     )
+
+
+def test_canary_slots_never_collapse_on_a_single_shot_clip():
+    """Regression: on a clip with one shot, the most-motion frame IS the middle
+    frame, and the selection silently returned two frames for a three-frame
+    canary — so the operator would approve less than they were quoted for."""
+    from claypipe import cli
+
+    plan = single_shot_plan(60, 12)
+    frames = [Path(f"f_{i:05d}.png") for i in range(1, 61)]
+    chosen, _caption = cli._canary_frame_names(frames, plan)
+    assert len(chosen) == 3
+    assert len({p.name for p in chosen}) == 3, [p.name for p in chosen]
+
+
+def test_canary_slots_are_distinct_for_a_multi_shot_clip(three_cut_clip: Path):
+    from claypipe import cli
+
+    plan = detect_shots(video=three_cut_clip, fps=12, total_frames=48)
+    frames = [Path(f"f_{i:05d}.png") for i in range(1, 49)]
+    chosen, caption = cli._canary_frame_names(frames, plan)
+    assert len({p.name for p in chosen}) == 3
+    assert "most-motion shot" in caption
