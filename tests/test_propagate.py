@@ -497,3 +497,259 @@ def test_the_projection_is_logged_before_the_spend(test_clip: Path, tmp_path: Pa
     assert entry["saved_usd"] == pytest.approx(
         entry["without_propagation_usd"] - entry["projected_usd"]
     )
+
+
+# ==========================================================================
+# T18a — the independent drift comparator.
+#
+# WHY TF CANNOT DO THIS JOB: a propagated frame IS a warp of its predecessor
+# along the optical flow, and temporal_fidelity scores a frame by warping its
+# predecessor along the optical flow and differencing. The metric and the
+# generation method are THE SAME OPERATION, so TF on a propagated frame is
+# near-circular — it measures its own assumption and scores well precisely
+# because the frame was made by the process doing the grading.
+#
+# Until this comparator existed, propagation had NO drift check at all, while
+# already being wired into `batch`.
+# ==========================================================================
+
+from claypipe.pipeline.propagate import (  # noqa: E402
+    DEFAULT_DRIFT_SAMPLE,
+    DriftScore,
+    FramePlan,
+    _stratified_sample,
+    drift_summary,
+    read_drift_scores,
+    score_drift,
+    write_drift_scores,
+)
+
+
+def test_tf_and_propagation_are_the_same_operation(panning_frames, temporal, tmp_path):
+    """The circularity, demonstrated rather than asserted.
+
+    A frame produced by warping along the flow, then scored by warping along
+    the flow, lands near the ceiling — regardless of how far it has drifted
+    from its source. The drift comparator exists because of this.
+    """
+    from claypipe.pipeline.restyle import DummyBackend
+    from claypipe.pipeline.score import load_image, structural_similarity_score, temporal_fidelity
+
+    out = tmp_path / "out"
+    out.mkdir()
+    first = out / panning_frames[0].name
+    DummyBackend().restyle(panning_frames[0], first, prompt="clay", strength=0.65, seed=1000)
+
+    # Chain ten warps forward.
+    previous = first
+    for i in range(1, 11):
+        dst = propagate_frame(
+            source_previous=panning_frames[i - 1], source_current=panning_frames[i],
+            restyled_previous=previous, dst=out / panning_frames[i].name, cfg=temporal,
+        )
+        previous = dst
+
+    tf = temporal_fidelity(
+        load_image(out / panning_frames[9].name),
+        load_image(out / panning_frames[10].name),
+        temporal,
+    )
+    source_ssim = structural_similarity_score(
+        load_image(panning_frames[10]), load_image(out / panning_frames[10].name)
+    )
+    # TF is near-perfect by construction. The source-referenced number is the
+    # one that can disagree with it, which is the entire point of T18a.
+    assert tf > 0.97, tf
+    assert source_ssim < tf, (
+        f"TF {tf:.4f} vs source-referenced SSIM {source_ssim:.4f} — if these "
+        "cannot diverge, the comparator adds nothing"
+    )
+
+
+def test_the_comparator_never_touches_the_flow_field(monkeypatch, panning_frames, temporal, tmp_path):
+    """Structural guarantee: if score_drift called the flow estimator, it would
+    inherit the circularity it exists to escape."""
+    from claypipe.pipeline import propagate as mod
+
+    called = {"flow": 0}
+    original = mod.flow_between
+
+    def tracking(*args, **kwargs):
+        called["flow"] += 1
+        return original(*args, **kwargs)
+
+    plan = plan_keyframes(
+        source_frames=panning_frames,
+        shot_plan=single_shot_plan(len(panning_frames), 12),
+        cfg=temporal, max_chain=4,
+    )
+    from claypipe.pipeline.restyle import DummyBackend
+
+    backend = DummyBackend()
+    execute_plan(
+        plan=plan, source_frames=panning_frames, out_dir=tmp_path / "out",
+        cfg=temporal,
+        restyle_keyframe=lambda i, s, d: backend.restyle(
+            s, d, prompt="clay", strength=0.65, seed=1000
+        ),
+        logger=_QuietLogger(),
+    )
+
+    pytest.importorskip("lpips", reason="needs the [scoring] extra")
+    from claypipe.pipeline.score import Scorer, models_are_cached
+
+    if not models_are_cached():
+        pytest.skip("learned-metric weights are not cached")
+
+    from claypipe.config import load_weights
+
+    monkeypatch.setattr(mod, "flow_between", tracking)
+    score_drift(
+        plan=plan, source_frames=panning_frames, out_dir=tmp_path / "out",
+        scorer=Scorer.build(load_weights()), sample=8,
+    )
+    assert called["flow"] == 0, "the drift comparator used the flow field"
+
+
+def test_drift_scores_only_propagated_frames(panning_frames, temporal, tmp_path):
+    """A keyframe is a fresh generation; measuring it against its source
+    measures the BACKEND, not propagation."""
+    pytest.importorskip("lpips", reason="needs the [scoring] extra")
+    from claypipe.pipeline.score import Scorer, models_are_cached
+
+    if not models_are_cached():
+        pytest.skip("learned-metric weights are not cached")
+
+    from claypipe.config import load_weights
+    from claypipe.pipeline.restyle import DummyBackend
+
+    plan = plan_keyframes(
+        source_frames=panning_frames,
+        shot_plan=single_shot_plan(len(panning_frames), 12),
+        cfg=temporal, max_chain=4,
+    )
+    backend = DummyBackend()
+    execute_plan(
+        plan=plan, source_frames=panning_frames, out_dir=tmp_path / "out",
+        cfg=temporal,
+        restyle_keyframe=lambda i, s, d: backend.restyle(
+            s, d, prompt="clay", strength=0.65, seed=1000
+        ),
+        logger=_QuietLogger(),
+    )
+    scores = score_drift(
+        plan=plan, source_frames=panning_frames, out_dir=tmp_path / "out",
+        scorer=Scorer.build(load_weights()), sample=99,
+    )
+    keyframes = set(plan.keyframes)
+    assert scores
+    for score in scores:
+        assert score.index not in keyframes
+        assert score.chain_length >= 1
+
+
+def test_the_sample_is_stratified_by_chain_depth():
+    """The question the sample must answer is 'does drift grow with depth'. A
+    uniform random sample would under-represent the deep chains that are the
+    entire risk."""
+    frames = []
+    for index in range(1, 201):
+        depth = 0 if index % 20 == 1 else (index % 20)
+        frames.append(
+            FramePlan(
+                index=index, shot_index=0, is_keyframe=(depth == 0),
+                reason="propagated" if depth else "shot_open", chain_length=depth,
+            )
+        )
+    picked = _stratified_sample(frames, 20)
+    depths = {f.chain_length for f in picked}
+    # Deep and shallow chains are both represented.
+    assert max(depths) >= 15, depths
+    assert min(depths) <= 3, depths
+    assert len(picked) <= 20
+
+
+def test_a_small_run_is_sampled_exhaustively():
+    frames = [
+        FramePlan(index=i, shot_index=0, is_keyframe=False, reason="propagated",
+                  chain_length=i)
+        for i in range(1, 6)
+    ]
+    assert len(_stratified_sample(frames, 48)) == 5
+
+
+def test_drift_summary_reports_the_depth_curve():
+    scores = [
+        DriftScore(frame=f"f_{i:05d}.png", index=i, chain_length=i,
+                   ssim=0.9 - i * 0.01, lpips_edges=0.1 + i * 0.01)
+        for i in range(1, 13)
+    ]
+    summary = drift_summary(scores)
+    assert summary["drift_sampled"] == 12
+    assert summary["max_depth_sampled"] == 12
+    assert "by_depth" in summary and len(summary["by_depth"]) >= 3
+    # The curve must be readable straight off the summary.
+    buckets = list(summary["by_depth"].values())
+    assert buckets[0]["ssim_mean"] > buckets[-1]["ssim_mean"]
+
+
+def test_drift_scores_round_trip(tmp_path: Path):
+    scores = [
+        DriftScore(frame="f_00005.png", index=5, chain_length=4, ssim=0.81,
+                   lpips_edges=0.22)
+    ]
+    path = write_drift_scores(scores, tmp_path / "drift.jsonl")
+    again = read_drift_scores(path)
+    assert again[0].as_dict() == scores[0].as_dict()
+
+
+def test_no_drift_file_reads_as_none_not_as_zero():
+    """'This run did not propagate' and 'drift measured at zero' are different
+    statements. An unmeasured run must never read as a clean one."""
+    from claypipe.pipeline.qccard import summarise_drift
+
+    assert summarise_drift(Path("/nonexistent/drift.jsonl")) is None
+
+
+def test_the_qc_card_reports_drift_beside_f_not_inside_it(
+    panning_frames, temporal, tmp_path
+):
+    from claypipe.pipeline.qccard import summarise_drift
+
+    scores = [
+        DriftScore(frame="f_00002.png", index=2, chain_length=1, ssim=0.8,
+                   lpips_edges=0.3)
+    ]
+    path = write_drift_scores(scores, tmp_path / "drift.jsonl")
+    summary = summarise_drift(path)
+    assert summary is not None
+    # It states, on the artefact itself, that it is not a gate.
+    assert "NOT part of" in summary["note"]
+    assert "T16" in summary["note"]
+
+
+def test_the_flag_page_explains_why_tf_cannot_do_this():
+    """A reviewer looking at a flagged frame from a propagated run needs to know
+    its TF is near-circular."""
+    from claypipe.verdi.flag_page import drift_section_html
+
+    html = drift_section_html(
+        {
+            "drift_sampled": 60, "ssim_mean": 0.34, "ssim_min": 0.03,
+            "lpips_edges_mean": 0.45, "lpips_edges_max": 0.67,
+            "max_depth_sampled": 12,
+            "by_depth": {"depth_0_3": {"n": 15, "ssim_mean": 0.37, "lpips_edges_mean": 0.47}},
+        }
+    )
+    assert "Not part of F" in html
+    assert "same operation" in html
+    assert "T16" in html
+    # And the no-propagation case says so rather than showing zeros.
+    empty = drift_section_html(None)
+    assert "did not use keyframe propagation" in empty
+    assert "Not the same as drift measured at zero" in empty
+
+
+def test_max_chain_default_is_unchanged_by_t18a():
+    """The brief is explicit: do not move it on dummy-backend evidence."""
+    assert DEFAULT_MAX_CHAIN == 12

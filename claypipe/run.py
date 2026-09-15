@@ -189,6 +189,16 @@ class RunPaths:
         return self.root / "keyframes.json"
 
     @property
+    def drift(self) -> Path:
+        """Source-referenced drift scores for propagated frames (T18a).
+
+        SEPARATE from scores.jsonl on purpose: these are not gate scores. There
+        is no calibrated threshold for source-referenced drift until T16, so
+        folding them into F would be inventing a number — the F4 mistake with a
+        new name."""
+        return self.root / "drift.jsonl"
+
+    @property
     def scores(self) -> Path:
         """Per-frame score log (SPEC §3): one JSON object per scored frame."""
         return self.root / "scores.jsonl"

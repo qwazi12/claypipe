@@ -710,8 +710,22 @@ One commit per task with its own acceptance test, matching the T1-T8 convention.
 Measured on a real 60-second reference slice (720 frames, 28 shots), with
 DummyBackend generating the keyframes.
 
-**FINDING 1 — temporal fidelity cannot validate propagation.** T18's second
-acceptance criterion is "propagated frames score TF >= 0.99". Measured:
+**FINDING 1 — temporal fidelity cannot validate propagation, and the reason is
+CIRCULARITY (sharpened by the operator, 2026-09-15).** A propagated frame IS a
+warp of its predecessor along the optical flow, and `temporal_fidelity` scores
+a frame by warping its predecessor along the optical flow and differencing. The
+metric and the generation method are **the same operation**. TF on a propagated
+frame is therefore near-circular: it measures its own assumption, and it scores
+well precisely because the frame was made by the process doing the grading.
+That is why more propagation scores better — more frames are being graded by
+the process that made them.
+
+The consequence is sharper than "TF measures how often a chain is interrupted":
+until T18a, propagation had **no drift check at all**, while already being
+wired into `batch`. T18a adds one that never touches the flow field.
+
+T18's second acceptance criterion is "propagated frames score TF >= 0.99".
+Measured:
 
 | max_chain | paid | reduction | TF min | TF mean | TF p5 | % >= 0.99 |
 |---|---|---|---|---|---|---|

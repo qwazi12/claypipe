@@ -435,3 +435,186 @@ def execute_plan(
     }
     logger.info("propagate.executed", **result)
     return result
+
+
+# ==========================================================================
+# T18a — the independent drift comparator.
+#
+# WHY TF CANNOT DO THIS JOB, stated precisely: a propagated frame IS a warp of
+# its predecessor along the optical flow, and `temporal_fidelity` scores a
+# frame by warping its predecessor along the optical flow and differencing.
+# The metric and the generation method are THE SAME OPERATION. TF on a
+# propagated frame is therefore near-circular — it is measuring its own
+# assumption, and it scores well precisely because the frame was made by the
+# process doing the grading.
+#
+# That is a stronger statement than "TF measures how often a chain is
+# interrupted" (the module docstring's FINDING 1), and it has a sharper
+# consequence: until this comparator existed, propagation had NO DRIFT CHECK AT
+# ALL, while already being wired into `batch`.
+#
+# The comparator never touches the flow field. It scores propagated frame N
+# against SOURCE frame N on SSIM and LPIPS-edges — the same two structure
+# metrics the surface-mode gate already uses, computed the same way, so the
+# numbers are comparable to a keyframe's.
+#
+# It is reported SEPARATELY and is NOT folded into F. There is no calibration
+# for a source-referenced drift threshold until T16 produces one on a real
+# backend, and inventing one here would be the F4 mistake with a new name.
+# ==========================================================================
+
+# Propagated frames are scored on a stratified SAMPLE, not exhaustively: LPIPS
+# is a neural forward pass per frame, and 600+ of them would cost more time
+# than the restyle it is checking. Stratified BY CHAIN DEPTH, because the
+# question the sample has to answer is "does drift grow with depth" — a uniform
+# random sample would under-represent the deep chains that are the whole risk.
+DEFAULT_DRIFT_SAMPLE = 48
+
+
+@dataclass(frozen=True)
+class DriftScore:
+    """One propagated frame, scored against its own source frame."""
+
+    frame: str
+    index: int
+    chain_length: int
+    ssim: float
+    lpips_edges: float
+
+    def as_dict(self) -> dict:
+        return {
+            "frame": self.frame,
+            "index": self.index,
+            "chain_length": self.chain_length,
+            "ssim": round(self.ssim, 5),
+            "lpips_edges": round(self.lpips_edges, 5),
+        }
+
+
+def _stratified_sample(frames: list[FramePlan], limit: int) -> list[FramePlan]:
+    """Spread `limit` picks across chain depths, deepest depths never dropped."""
+    propagated = [f for f in frames if not f.is_keyframe]
+    if len(propagated) <= limit:
+        return propagated
+
+    buckets: dict[int, list[FramePlan]] = {}
+    for frame in propagated:
+        buckets.setdefault(frame.chain_length, []).append(frame)
+
+    picked: list[FramePlan] = []
+    depths = sorted(buckets)
+    per_depth = max(1, limit // len(depths))
+    for depth in depths:
+        group = buckets[depth]
+        step = max(1, len(group) // per_depth)
+        picked.extend(group[::step][:per_depth])
+    return sorted(picked, key=lambda f: f.index)[:limit]
+
+
+def score_drift(
+    *,
+    plan: KeyframePlan,
+    source_frames: list[Path],
+    out_dir: Path,
+    scorer,
+    sample: int = DEFAULT_DRIFT_SAMPLE,
+    logger: RunLogger | None = None,
+) -> list[DriftScore]:
+    """Score propagated frames against their SOURCE frames. Never uses flow.
+
+    `scorer` is a `score.Scorer`, reused so SSIM and LPIPS-edges are computed
+    exactly as the gate computes them — a drift number that used a different
+    edge detector or a different LPIPS net would not be comparable to a
+    keyframe's score, which is the only thing that makes it interpretable.
+    """
+    from .score import lpips_edge_distance, load_image, structural_similarity_score
+
+    chosen = _stratified_sample(plan.frames, sample)
+    scores: list[DriftScore] = []
+    for frame in chosen:
+        src = source_frames[frame.index - 1]
+        dst = out_dir / src.name
+        if not dst.is_file():
+            continue
+        source_img = load_image(src)
+        warped_img = load_image(dst)
+        scores.append(
+            DriftScore(
+                frame=src.name,
+                index=frame.index,
+                chain_length=frame.chain_length,
+                ssim=structural_similarity_score(source_img, warped_img),
+                lpips_edges=lpips_edge_distance(
+                    source_img, warped_img, scorer.perceptual, scorer.cfg.canny
+                ),
+            )
+        )
+
+    if logger is not None:
+        logger.info(
+            "propagate.drift.scored",
+            sampled=len(scores),
+            propagated_total=plan.propagated_frames,
+            **drift_summary(scores),
+        )
+    return scores
+
+
+def drift_summary(scores: list[DriftScore]) -> dict:
+    """Per-depth means, so the depth question is answerable from the summary."""
+    if not scores:
+        return {"drift_sampled": 0}
+
+    by_depth: dict[int, list[DriftScore]] = {}
+    for score in scores:
+        bucket = score.chain_length // 4 * 4
+        by_depth.setdefault(bucket, []).append(score)
+
+    curve = {}
+    for bucket in sorted(by_depth):
+        group = by_depth[bucket]
+        curve[f"depth_{bucket}_{bucket + 3}"] = {
+            "n": len(group),
+            "ssim_mean": round(sum(s.ssim for s in group) / len(group), 4),
+            "lpips_edges_mean": round(
+                sum(s.lpips_edges for s in group) / len(group), 4
+            ),
+        }
+
+    ssims = [s.ssim for s in scores]
+    lpips = [s.lpips_edges for s in scores]
+    return {
+        "drift_sampled": len(scores),
+        "ssim_mean": round(sum(ssims) / len(ssims), 4),
+        "ssim_min": round(min(ssims), 4),
+        "lpips_edges_mean": round(sum(lpips) / len(lpips), 4),
+        "lpips_edges_max": round(max(lpips), 4),
+        "max_depth_sampled": max(s.chain_length for s in scores),
+        "by_depth": curve,
+    }
+
+
+def write_drift_scores(scores: list[DriftScore], path: Path) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w") as fh:
+        for score in scores:
+            fh.write(json.dumps(score.as_dict()) + "\n")
+    return path
+
+
+def read_drift_scores(path: Path) -> list[DriftScore]:
+    if not path.is_file():
+        return []
+    out = []
+    for line in path.read_text().splitlines():
+        if not line.strip():
+            continue
+        record = json.loads(line)
+        out.append(
+            DriftScore(
+                frame=record["frame"], index=record["index"],
+                chain_length=record["chain_length"],
+                ssim=record["ssim"], lpips_edges=record["lpips_edges"],
+            )
+        )
+    return out

@@ -326,6 +326,8 @@ def _effective_prompt(run: Run, profile) -> str:
 def _run_with_propagation(
     run: Run, weights, backend, profile, prompt: str, shot_plan, ledger,
     *, residual_max: float | None, max_chain: int | None,
+    scorer=None, drift_scoring: bool = False,
+    drift_sample: int = propagate.DEFAULT_DRIFT_SAMPLE,
 ) -> int:
     """T18: plan the keyframes, show the cost, then spend only on those.
 
@@ -384,7 +386,78 @@ def _run_with_propagation(
         out_dir=run.paths.restyled_frames, cfg=weights.temporal,
         restyle_keyframe=restyle_keyframe, logger=run.logger,
     )
+
+    # T18a: the INDEPENDENT drift check. Until this existed, propagation had no
+    # drift check at all while already being wired into batch — TF cannot serve
+    # as one, because a propagated frame is a warp along the optical flow and
+    # TF grades by warping along the optical flow. Same operation, so the score
+    # is near-circular.
+    #
+    # Needs the learned metric, so it is skipped on backends that are not
+    # scored at all (dummy, D27) unless the operator asks — and when it IS run
+    # on dummy the report says the result is a null control, not a validation.
+    if scorer is not None or drift_scoring:
+        _score_propagation_drift(
+            run, weights, keyframe_plan, sources, backend, sample=drift_sample
+        )
+    else:
+        run.logger.info(
+            "propagate.drift.skipped",
+            reason="backend is unscored (D27); pass --drift-scoring to measure "
+                   "the dummy null control anyway",
+        )
     return result["total_frames"]
+
+
+def _score_propagation_drift(
+    run: Run, weights, keyframe_plan, sources, backend, *, sample: int
+) -> None:
+    """Score propagated frames against their SOURCE frames (T18a)."""
+    try:
+        from .pipeline.score import Scorer, models_are_cached
+    except ImportError as exc:
+        run.logger.warn("propagate.drift.unavailable", error=str(exc))
+        return
+    if not models_are_cached():
+        run.logger.warn(
+            "propagate.drift.unavailable",
+            reason="LPIPS/CLIP weights are not cached; drift scoring needs the "
+                   "learned metric and must never download mid-run",
+        )
+        return
+
+    scorer = Scorer.build(weights)
+    scores = propagate.score_drift(
+        plan=keyframe_plan, source_frames=sources,
+        out_dir=run.paths.restyled_frames, scorer=scorer,
+        sample=sample, logger=run.logger,
+    )
+    if not scores:
+        return
+    propagate.write_drift_scores(scores, run.paths.drift)
+
+    summary = propagate.drift_summary(scores)
+    typer.echo(
+        f"propagation drift (vs SOURCE, {summary['drift_sampled']} sampled): "
+        f"SSIM mean {summary['ssim_mean']} min {summary['ssim_min']}, "
+        f"LPIPS-edges mean {summary['lpips_edges_mean']} "
+        f"max {summary['lpips_edges_max']}, deepest chain "
+        f"{summary['max_depth_sampled']}"
+    )
+    if backend.name == "dummy":
+        typer.secho(
+            "  NOTE: this is a NULL CONTROL, not a validation. The dummy "
+            "backend outputs flat posterised colour fields, which resample "
+            "near-losslessly — it cannot show the smear repeated warping would "
+            "cause in real clay texture. Read a flat curve here as 'the "
+            "measurement works', not as 'propagation is safe'.",
+            fg=typer.colors.YELLOW,
+        )
+    typer.secho(
+        "  NOT gated: no calibrated threshold for source-referenced drift "
+        "exists until T16 measures one on a real backend.",
+        fg=typer.colors.CYAN,
+    )
 
 
 def _build_shot_plan(run: Run, extracted: int):
@@ -605,6 +678,18 @@ def batch(
              "fewer paid frames on a 60s reference clip. Track A only — a clip "
              "backend already works on ranges.",
     ),
+    drift_scoring: bool = typer.Option(
+        False, "--drift-scoring",
+        help="T18a: score propagated frames against their SOURCE frames even "
+             "on an unscored backend. On dummy this measures the null control "
+             "— useful to prove the instrument works, not to validate "
+             "propagation.",
+    ),
+    drift_sample: int = typer.Option(
+        propagate.DEFAULT_DRIFT_SAMPLE, "--drift-sample",
+        help="How many propagated frames to score for drift, stratified by "
+             "warp-chain depth.",
+    ),
     residual_max: Optional[float] = typer.Option(
         None, "--keyframe-residual-max",
         help="A frame whose flow-explained residual exceeds this gets a new "
@@ -729,6 +814,8 @@ def batch(
             total = _run_with_propagation(
                 run, weights, backend, profile, prompt, plan, ledger,
                 residual_max=residual_max, max_chain=max_chain,
+                scorer=scorer, drift_scoring=drift_scoring,
+                drift_sample=drift_sample,
             )
         except (propagate.PropagationError, RunHalted) as exc:
             run.logger.error("batch.failed", error=str(exc))
@@ -1237,6 +1324,7 @@ def canary_render(
         flag = flag_page.write_flag_page(
             run.paths.root, run_id=run.run_id, backend=run.manifest.backend,
             selection=selection, cfg=weights.review,
+            drift=qccard.summarise_drift(run.paths.drift),
         )
         run.logger.info(
             "flag.render", path=str(flag), cards=selection.shown,

@@ -101,6 +101,12 @@ def build_card(run: Run, *, frames: int, verdict: str, extra: dict[str, Any] | N
         "fps": run.manifest.fps,
         "frames": frames,
         "scores": summarise_scores(run.paths.scores),
+        # T18a: reported BESIDE the gate scores, never inside them. TF cannot
+        # measure propagation drift — a propagated frame is a warp along the
+        # optical flow and TF grades by warping along the optical flow, so the
+        # metric and the generation method are the same operation. This is the
+        # independent check, scored against the SOURCE.
+        "propagation_drift": summarise_drift(run.paths.drift),
         "auto_retries": None,
         "human_flags": None,
         "human_overrides": None,
@@ -112,6 +118,26 @@ def build_card(run: Run, *, frames: int, verdict: str, extra: dict[str, Any] | N
     if extra:
         card.update(extra)
     return card
+
+
+def summarise_drift(path: Path) -> dict | None:
+    """The T18a drift summary, or None when propagation was not used.
+
+    None means "this run did not propagate", which is a different statement
+    from "propagation drifted by zero" — an unmeasured run must never read as
+    a clean one (the same rule `summarise_scores` follows)."""
+    from .propagate import drift_summary, read_drift_scores
+
+    scores = read_drift_scores(path)
+    if not scores:
+        return None
+    summary = drift_summary(scores)
+    summary["note"] = (
+        "source-referenced SSIM/LPIPS-edges on propagated frames. NOT part of "
+        "F and NOT gated: there is no calibrated threshold for source-"
+        "referenced drift until T16 measures one on a real backend."
+    )
+    return summary
 
 
 def write_card(run: Run, card: dict, history_dir: Path) -> Path:

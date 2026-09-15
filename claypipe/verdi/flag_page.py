@@ -155,6 +155,58 @@ def _card_html(card: ReviewCard) -> str:
     )
 
 
+def drift_section_html(summary: dict | None) -> str:
+    """T18a: propagation drift, shown BESIDE the gate scores, never inside them.
+
+    Rendered as its own panel with the reason it is not a gate stated on the
+    page. A reviewer looking at a flagged frame from a propagated run needs to
+    know that its TF is near-circular — the frame is a warp along the optical
+    flow and TF grades by warping along the optical flow — and that this panel
+    is the only number here that independently checked it.
+    """
+    if summary is None:
+        return (
+            '<section class="panel"><h2>Propagation drift</h2>'
+            "<p class=\"hint\">This run did not use keyframe propagation, so "
+            "there is nothing to check. (Not the same as drift measured at "
+            "zero.)</p></section>"
+        )
+
+    rows = ""
+    for label, stats in (summary.get("by_depth") or {}).items():
+        depth = esc(label.replace("depth_", "").replace("_", "-"))
+        rows += (
+            f"<tr><td>{depth}</td><td>{stats['n']}</td>"
+            f"<td>{stats['ssim_mean']}</td>"
+            f"<td>{stats['lpips_edges_mean']}</td></tr>"
+        )
+
+    return (
+        '<section class="panel"><h2>Propagation drift (vs SOURCE)</h2>'
+        "<p class=\"hint\"><strong>Not part of F, and not gated.</strong> "
+        "Temporal fidelity cannot measure propagation drift: a propagated frame "
+        "is a warp along the optical flow, and TF grades a frame by warping "
+        "along the optical flow, so the metric and the generation method are "
+        "the same operation. These numbers score the propagated frame against "
+        "its own SOURCE frame instead, which never touches the flow field. "
+        "There is no calibrated threshold for them until T16 measures one on a "
+        "real backend.</p>"
+        f"<p>{summary['drift_sampled']} frames sampled, stratified by warp-chain "
+        f"depth (deepest {summary.get('max_depth_sampled', 0)}). "
+        f"SSIM mean <strong>{summary['ssim_mean']}</strong> "
+        f"(min {summary['ssim_min']}), "
+        f"LPIPS-edges mean <strong>{summary['lpips_edges_mean']}</strong> "
+        f"(max {summary['lpips_edges_max']}).</p>"
+        + (
+            '<table class="metrics"><tr><th>chain depth</th><th>n</th>'
+            "<th>SSIM</th><th>LPIPS-edges</th></tr>" + rows + "</table>"
+            if rows
+            else ""
+        )
+        + "</section>"
+    )
+
+
 def render_flag_page(
     *,
     run_id: str,
@@ -162,6 +214,7 @@ def render_flag_page(
     selection: Selection,
     cfg: ReviewConfig,
     memory_path: Path | None = None,
+    drift: dict | None = None,
 ) -> str:
     scored = all(c.score is not None for c in selection.cards) and bool(selection.cards)
     caveats = []
@@ -197,6 +250,7 @@ def render_flag_page(
         "Copy that URL to the CLI; nothing is sent anywhere.</p></section>"
         f'<div class="cards">{"".join(_card_html(c) for c in selection.cards)}</div>'
         "</form>"
+        + drift_section_html(drift)
     )
     return page_shell(
         title="ClayPipe flag review",
@@ -213,6 +267,7 @@ def write_flag_page(
     backend: str,
     selection: Selection,
     cfg: ReviewConfig,
+    drift: dict | None = None,
     memory_path: Path | None = None,
     open_browser: bool = False,
 ) -> Path:
@@ -237,7 +292,7 @@ def write_flag_page(
         )
     html_text = render_flag_page(
         run_id=run_id, backend=backend, selection=selection, cfg=cfg,
-        memory_path=memory_path,
+        memory_path=memory_path, drift=drift,
     )
     dst = run_dir / PAGE_NAME
     dst.parent.mkdir(parents=True, exist_ok=True)
