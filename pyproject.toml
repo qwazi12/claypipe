@@ -25,7 +25,9 @@ scoring = ["scikit-image>=0.22", "lpips>=0.1.4", "opencv-python>=4.9", "open-cli
 # T11 (shot detection). PySceneDetect 0.7 dropped the [opencv] extra — pip
 # warns and installs nothing for it — so opencv-python is named directly.
 shots = ["scenedetect>=0.6.4", "opencv-python>=4.9"]
-# Build Order step 6 (captions)
+# T12 (captions). Transcription only — the caption BAND is rendered with
+# Pillow, which is a core dependency, so a hand-authored cues.json needs
+# nothing extra installed.
 captions = ["faster-whisper>=1.0"]
 # Build Order step 5 (real API backend — never used in tests)
 fal = ["fal-client>=0.4"]

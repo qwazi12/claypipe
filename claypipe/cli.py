@@ -19,7 +19,7 @@ from .config import ConfigError, load_all
 from .pipeline import assemble as assemble_stage
 from .pipeline import qccard
 from .pipeline.extract import count_frames, extract_audio, extract_frames, frame_paths
-from .pipeline import shots
+from .pipeline import captions, shots
 from .pipeline.layout import LayoutError, source_aspect_of
 from .pipeline.restyle import get_backend, restyle_frames
 from .pipeline.retry import RetryController
@@ -1052,6 +1052,71 @@ def canary_submit(
         for name, entry in sorted(verdict.get("frames", {}).items()):
             note = f" — {entry.get('note')}" if entry.get("note") else ""
             typer.echo(f"  {name}: {entry.get('verdict')}{note}")
+
+
+@app.command("captions")
+def captions_cmd(
+    run_dir: Path = typer.Argument(..., help="Run directory or run id"),
+    runs_dir: Optional[Path] = typer.Option(None, "--runs-dir"),
+    model_size: str = typer.Option(
+        "base", "--model", help="faster-whisper model size: tiny|base|small|medium|large-v3"
+    ),
+    language: Optional[str] = typer.Option(
+        None, "--language", help="Force a language instead of autodetecting."
+    ),
+    overwrite: bool = typer.Option(
+        False, "--overwrite",
+        help="Replace an existing cues.json. Refused by default, because that "
+             "file is hand-edited — it is where the non-dialogue cues live.",
+    ),
+) -> None:
+    """Transcribe the run's audio into phrase-level cues (T12).
+
+    Writes `cues.json`, which `assemble` renders into the gap band between the
+    two panels. The file is deliberately hand-editable: non-dialogue cues
+    (`[dramatic music]`, `*crunch*`) are PRESERVED and rendered but never
+    INVENTED — Whisper transcribes speech, and labelling a sound effect needs
+    an audio event classifier this pipeline does not have.
+
+    Runs entirely locally. faster-whisper is an optional extra and costs
+    nothing per clip, so this stage is outside the spend firewalls.
+    """
+    styles, _, _ = _startup()
+    run, _ = _load_run_for(run_dir, runs_dir, styles)
+
+    if run.paths.cues.is_file() and not overwrite:
+        _fail(
+            f"{run.paths.cues} already exists. It is hand-edited — that is "
+            "where non-dialogue cues live — so it is not replaced silently. "
+            "Pass --overwrite to discard it."
+        )
+    if not run.paths.audio.is_file():
+        _fail(
+            f"{run.paths.audio} is missing. Run `claypipe canary restyle` or "
+            "`claypipe batch` first — both extract the audio track."
+        )
+
+    try:
+        cues = captions.transcribe(
+            run.paths.audio, model_size=model_size, language=language, logger=run.logger
+        )
+    except captions.CaptionError as exc:
+        _fail(str(exc))
+
+    captions.save_cues(cues, run.paths.cues)
+    captions.write_srt(cues, run.paths.subtitles)
+    run.logger.info(
+        "captions.written",
+        path=str(run.paths.cues), cues=len(cues),
+        nondialogue=sum(1 for c in cues if c.is_nondialogue),
+        model=model_size,
+    )
+    typer.echo(run.paths.cues)
+    typer.secho(
+        f"{len(cues)} phrase cues written. Edit {run.paths.cues.name} to fix "
+        "transcription or add non-dialogue cues, then run `claypipe assemble`.",
+        fg=typer.colors.GREEN,
+    )
 
 
 @app.command()

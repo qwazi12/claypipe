@@ -7,6 +7,10 @@ Two hard failures live here, and neither is a warning:
   * frame-count mismatch  (extracted == restyled == reassembled)
   * audio packet-MD5 mismatch between the extracted track and the final file
 
+T12: captions are composited into the gap band as a finite PNG sequence, NOT
+burned over the picture with libass. The `subtitles=` filter is gone — see
+captions.py for why.
+
 Header note: SPEC §6 says `drawtext`, but ffmpeg builds vary and the installed
 one has no such filter, so the header bar is rendered to a PNG with PIL and
 composited with `overlay` (memory.md D1). Same output, no build dependency.
@@ -27,6 +31,7 @@ from .. import ffmpeg
 from ..config import RenderConfig, StyleProfile, hex_to_rgb
 from ..logging import RunLogger
 from ..run import Run
+from . import captions
 from .extract import count_frames
 from .layout import Layout, source_aspect_of
 
@@ -134,7 +139,7 @@ def build_comparison(
     layout: Layout,
     fps: int,
     frames: int,
-    subtitles: Path | None,
+    caption_track: Path | None,
     logger: RunLogger,
 ) -> Path:
     """The 9:16 stack: header bar, restyled on top, caption gap, original below."""
@@ -154,10 +159,14 @@ def build_comparison(
         f"[base][bot]overlay=x=0:y={bottom_y}[s2];"
         f"[s2][2:v]overlay=x=0:y=0:eof_action=repeat[hdr]"
     )
-    if subtitles is not None:
-        # libass burn-in, centred on the divider between the two panels.
-        escaped = str(subtitles).replace("\\", "/").replace(":", "\\:")
-        graph += f";[hdr]subtitles='{escaped}'[cap]"
+    if caption_track is not None:
+        # T12: captions are a LAYOUT ELEMENT composited into the gap band, not
+        # a subtitle filter drawn over the picture. libass has no idea the gap
+        # exists, so a long cue at a large size spills onto a panel and crops a
+        # face — in a file that plays perfectly. The track is a finite PNG
+        # sequence at the run's own fps, exactly `frames` long, overlaid at the
+        # gap's y offset, so a caption physically cannot reach a panel.
+        graph += f";[hdr][3:v]overlay=x=0:y={layout.gap_y}:eof_action=pass[cap]"
     else:
         graph += ";[hdr]null[cap]"
 
@@ -177,9 +186,19 @@ def build_comparison(
         # No -loop: a single still is repeated by the overlay, and looping it
         # would reintroduce an unbounded input.
         "-i", str(header),
+    ]
+    # The caption track goes in as input 3 so the audio index shifts; both are
+    # referenced by number in the graph and the map, so this order is load-
+    # bearing. A PNG sequence at a fixed framerate is a FINITE input — the
+    # unbounded-input trap D5 records applies to `color` and `-loop`, not this.
+    audio_index = 3
+    if caption_track is not None:
+        args += ["-framerate", str(fps), "-i", str(caption_track)]
+        audio_index = 4
+    args += [
         "-i", str(audio),
         "-filter_complex", graph,
-        "-map", "[v]", "-map", "3:a:0",
+        "-map", "[v]", "-map", f"{audio_index}:a:0",
         "-c:v", "libx264", "-crf", str(render.crf), "-pix_fmt", render.pix_fmt,
         "-r", str(fps),
         # The sync guarantee: the original audio is copied, never re-encoded.
@@ -192,7 +211,8 @@ def build_comparison(
         "assemble.rendered",
         path=str(dst),
         size=f"{layout.canvas_width}x{layout.canvas_height}",
-        captions=bool(subtitles),
+        captions=bool(caption_track),
+        caption_band_y=layout.gap_y if caption_track else None,
         **layout.as_dict(),
     )
     return dst
@@ -307,6 +327,20 @@ def assemble(run: Run, render: RenderConfig, profile: StyleProfile, source_audio
         p.restyled_frames, p.restyled_video, run.manifest.fps, render, run.logger
     )
     render_header(p.header_png, run.manifest.clip_title, render, profile, layout)
+
+    # T12: a cue file, if the operator made one, becomes the caption track.
+    # Absent, the run renders with no captions rather than with a guess.
+    caption_track: Path | None = None
+    if p.cues.is_file():
+        cues = captions.load_cues(p.cues)
+        captions.render_caption_track(
+            cues, out_dir=p.caption_frames, layout=layout, render=render,
+            profile=profile, fps=run.manifest.fps, total_frames=frames,
+            logger=run.logger,
+        )
+        caption_track = p.caption_frames / captions.CAPTION_FRAME_PATTERN
+        captions.write_srt(cues, p.subtitles)
+
     build_comparison(
         restyled_video=p.restyled_video,
         source_video=Path(run.manifest.source_path),
@@ -318,7 +352,7 @@ def assemble(run: Run, render: RenderConfig, profile: StyleProfile, source_audio
         layout=layout,
         fps=run.manifest.fps,
         frames=frames,
-        subtitles=p.subtitles if p.subtitles.is_file() else None,
+        caption_track=caption_track,
         logger=run.logger,
     )
     return verify_output(
