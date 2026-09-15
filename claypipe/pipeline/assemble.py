@@ -117,8 +117,13 @@ def _panel_filter(layout: Layout) -> str:
     aspects disagree (a forced canvas, or a source whose aspect was overridden),
     because a mismatched scale would stretch faces and nothing downstream would
     catch it.
+
+    T9a: the target is the PANEL's size, not the canvas width. On a height-fit
+    layout the panel is narrower than the canvas and sits pillarboxed, so
+    scaling to the canvas width here would stretch every face while still
+    producing a file that plays.
     """
-    w, h = layout.canvas_width, layout.panel_height
+    w, h = layout.panel_width, layout.panel_height
     return (
         f"crop=w=trunc(min(iw\\,ih*{w}/{h})/2)*2:"
         f"h=trunc(min(ih\\,iw*{h}/{w})/2)*2:"
@@ -154,9 +159,10 @@ def build_comparison(
     # before this was changed. Padding a finite input keeps the whole graph
     # bounded by the restyled video's own length.
     graph = (
-        f"[0:v]{panel},pad={layout.canvas_width}:{layout.canvas_height}:0:{top_y}:color={bg}[base];"
+        f"[0:v]{panel},pad={layout.canvas_width}:{layout.canvas_height}:"
+        f"{layout.panel_x}:{top_y}:color={bg}[base];"
         f"[1:v]{panel}[bot];"
-        f"[base][bot]overlay=x=0:y={bottom_y}[s2];"
+        f"[base][bot]overlay=x={layout.panel_x}:y={bottom_y}[s2];"
         f"[s2][2:v]overlay=x=0:y=0:eof_action=repeat[hdr]"
     )
     if caption_track is not None:
@@ -246,6 +252,11 @@ def verify_output(
         raise AssemblyError(
             f"layout does not close: {layout.top_margin} + 2*{layout.panel_height} "
             f"+ {layout.gap_height} + {layout.bottom_margin} != {layout.canvas_height}"
+        )
+    if layout.panel_x * 2 + layout.panel_width > layout.canvas_width:
+        raise AssemblyError(
+            f"panel is not horizontally centred: x={layout.panel_x} + "
+            f"width={layout.panel_width} overflows a {layout.canvas_width}px canvas"
         )
 
     actual_frames = _count_video_frames(dst)
