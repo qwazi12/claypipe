@@ -388,3 +388,71 @@ def test_captions_command_needs_extracted_audio(test_clip: Path, tmp_path: Path)
     )
     assert result.exit_code != 0
     assert "audio" in result.output.lower()
+
+
+# ---------------------------------------------------------------------------
+# Regression: found by LOOKING at a rendered frame, not by a test.
+# ---------------------------------------------------------------------------
+
+def test_a_two_line_cue_clears_both_panels(layout, render_cfg, profile):
+    """The bug: a two-line cue fitted to the FULL band height rendered edge to
+    edge — ink in rows 6..71 of a 72px band. Technically inside it, and the
+    frame still looked like the caption was crossing into the picture, which is
+    the exact failure T12 exists to prevent. A containment-only check passed it.
+
+    Cause: the fitter measured line height with getbbox("Ay") (ink extent)
+    while the renderer used getmetrics() (ascent+descent, which is taller). The
+    fitter approved a size that then rendered taller than it had measured.
+    """
+    long_cue = Cue(
+        0.0, 4.0,
+        "I have been telling you this for three entire weeks, and nobody listens.",
+    )
+    image = render_cue_image(long_cue, layout=layout, render=render_cfg, profile=profile)
+    bbox = image.split()[-1].getbbox()
+    assert bbox is not None
+    _left, top, _right, bottom = bbox
+
+    clearance = max(1, int(layout.gap_height * captions.CAPTION_VERTICAL_PADDING) // 2)
+    assert top >= clearance, f"ink starts at row {top}, under {clearance}px clearance"
+    assert bottom <= layout.gap_height - clearance, (
+        f"ink ends at row {bottom} of {layout.gap_height}, under {clearance}px clearance"
+    )
+
+
+def test_the_fitter_and_the_renderer_agree_on_line_height(render_cfg):
+    """One definition, shared. Two definitions is what caused the overflow."""
+    from PIL import ImageFont
+
+    font = ImageFont.truetype(str(render_cfg.font_path()), 40)
+    assert captions.line_height_for(font) > 0
+    # The renderer must use exactly this, so a fitted size cannot render taller
+    # than it was measured.
+    ascent, descent = font.getmetrics()
+    assert captions.line_height_for(font) == int(
+        (ascent + descent) * captions.LINE_SPACING
+    )
+
+
+def test_ink_touching_a_band_edge_is_now_refused(layout):
+    """assert_within_gap used to accept this. Containment is not enough: ink on
+    row 0 or the last row abuts a panel and reads as overlapping it."""
+    edge_to_edge = Image.new(
+        "RGBA", (layout.canvas_width, layout.gap_height), (255, 255, 255, 255)
+    )
+    with pytest.raises(CaptionError, match="clearance"):
+        assert_within_gap(edge_to_edge, layout)
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "[dramatic music]",
+        "Fine. We will do it your way.",
+        "I have been telling you this for three entire weeks, and nobody listens.",
+        "word " * 60,
+    ],
+)
+def test_every_cue_length_clears_the_panels(text, layout, render_cfg, profile):
+    image = render_cue_image(Cue(0.0, 2.0, text), layout=layout, render=render_cfg, profile=profile)
+    assert_within_gap(image, layout)   # now includes the clearance check

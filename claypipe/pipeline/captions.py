@@ -254,24 +254,52 @@ def write_srt(cues: list[Cue], path: Path) -> Path:
 # Rendering into the gap band
 # --------------------------------------------------------------------------
 
+# Vertical breathing room inside the gap band, as a fraction of its height.
+#
+# WITHOUT THIS, a two-line cue fitted to the full band height renders edge to
+# edge: ink in rows 6..71 of a 72px band, technically inside it and visually
+# touching both panels. `assert_within_gap` passed and the frame still looked
+# like the caption was crossing into the picture — which is the exact failure
+# T12 exists to prevent. Found by looking at a rendered frame, not by a test.
+CAPTION_VERTICAL_PADDING = 0.14
+
+# Line spacing multiplier. Used by BOTH the fitter and the renderer — see
+# `line_height_for`.
+LINE_SPACING = 1.15
+
+
+def line_height_for(font: ImageFont.FreeTypeFont) -> int:
+    """One line's vertical advance.
+
+    ONE definition, shared by the fitter and the renderer. They previously used
+    two: the fitter measured `getbbox("Ay")` (ink extent) while the renderer used
+    `getmetrics()` (ascent+descent, which is taller). So the fitter approved a
+    size that then rendered taller than it had measured, and a two-line cue
+    overflowed the band it had just been checked against.
+    """
+    ascent, descent = font.getmetrics()
+    return int((ascent + descent) * LINE_SPACING)
+
+
 def _fit_font(
     draw: ImageDraw.ImageDraw, text: str, font_path: Path, size: int, box: tuple[int, int]
 ) -> tuple[ImageFont.FreeTypeFont, list[str]]:
     """Largest font at or below `size` whose wrapped text fits `box`.
 
     Returns the font and the wrapped lines. Shrinking is bounded by the band's
-    height, which is the point of doing this in PIL: the gap is a known box and
-    the text is measured against it, rather than drawn and hoped for.
+    usable height, which is the point of doing this in PIL: the gap is a known
+    box and the text is measured against it rather than drawn and hoped for.
     """
     width, height = box
-    for candidate in range(size, 11, -2):
+    for candidate in range(size, 9, -2):
         font = ImageFont.truetype(str(font_path), candidate)
         lines = _wrap(draw, text, font, width)
-        line_height = font.getbbox("Ay")[3] - font.getbbox("Ay")[1]
-        total = len(lines) * int(line_height * 1.25)
+        total = len(lines) * line_height_for(font)
         if total <= height and all(draw.textlength(l, font=font) <= width for l in lines):
             return font, lines
-    font = ImageFont.truetype(str(font_path), 12)
+    # Floor. Still measured, so the caller's assert_within_gap can catch a band
+    # too short to letter at all rather than silently clipping.
+    font = ImageFont.truetype(str(font_path), 10)
     return font, _wrap(draw, text, font, width)
 
 
@@ -312,17 +340,21 @@ def render_cue_image(
 
     draw = ImageDraw.Draw(img)
     pad_x = int(layout.canvas_width * padding_fraction)
-    box = (layout.canvas_width - 2 * pad_x, layout.gap_height)
+    # Reserve vertical padding so the text CLEARS both panels rather than
+    # merely staying inside the band. A caption whose descenders sit on the
+    # panel boundary reads as overlapping it.
+    pad_y = int(layout.gap_height * CAPTION_VERTICAL_PADDING)
+    usable = max(1, layout.gap_height - 2 * pad_y)
+    box = (layout.canvas_width - 2 * pad_x, usable)
     font, lines = _fit_font(
         draw, cue.text, render.font_path(), render.caption_font_size, box
     )
     if not lines:
         return img
 
-    ascent, descent = font.getmetrics()
-    line_height = int((ascent + descent) * 1.15)
+    line_height = line_height_for(font)
     total = line_height * len(lines)
-    y = max(0, (layout.gap_height - total) // 2)
+    y = max(pad_y, pad_y + (usable - total) // 2)
     colour = hex_to_rgb(profile.header_text_color) + (255,)
     for line in lines:
         w = draw.textlength(line, font=font)
@@ -418,4 +450,14 @@ def assert_within_gap(image: Image.Image, layout: Layout) -> None:
     if top < 0 or bottom > layout.gap_height:
         raise CaptionError(
             f"caption ink spans y={top}..{bottom} inside a {layout.gap_height}px band"
+        )
+    # Containment is not enough. Ink touching row 0 or the last row abuts a
+    # panel and READS as overlapping it, which is the failure T12 exists to
+    # prevent — and a containment-only check passed it.
+    clearance = max(1, int(layout.gap_height * CAPTION_VERTICAL_PADDING) // 2)
+    if top < clearance or bottom > layout.gap_height - clearance:
+        raise CaptionError(
+            f"caption ink spans y={top}..{bottom} in a {layout.gap_height}px "
+            f"band, leaving less than {clearance}px of clearance from a panel. "
+            "It is inside the band but reads as overlapping the picture."
         )
