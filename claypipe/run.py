@@ -107,6 +107,12 @@ class RunPaths:
         return self.root / "final_comparison.mp4"
 
     @property
+    def shot_plan(self) -> Path:
+        """Shot boundaries, seeds and motion ranking (T11). Written by `batch`,
+        read by the canary renderer and by T18's keyframe propagation."""
+        return self.root / "shots.json"
+
+    @property
     def scores(self) -> Path:
         """Per-frame score log (SPEC §3): one JSON object per scored frame."""
         return self.root / "scores.jsonl"

@@ -146,7 +146,11 @@ def test_render_cli_generates_pages_from_run_state(batched_run: Path) -> None:
     assert html.count("data:image/png;base64,") == 3
     for offender in ("http://", "https://", "<script", "<link", "@import"):
         assert offender not in html
-    assert "first frame" in html and "stand-in for most-motion" in html
+    assert "first frame" in html
+    # T11/D30: the third slot names the most-motion shot when a shot plan
+    # exists, and says plainly that it is a stand-in when one does not. What it
+    # must never be is an unlabelled guess.
+    assert ("most-motion shot" in html) or ("stand-in: no shot plan" in html)
     # dummy run -> unscored -> the caveat must be present
     assert "Caveat" in html
     assert "flag page skipped" in result.output

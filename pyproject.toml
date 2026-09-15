@@ -22,8 +22,9 @@ dependencies = [
 [project.optional-dependencies]
 # Build Order step 2
 scoring = ["scikit-image>=0.22", "lpips>=0.1.4", "opencv-python>=4.9", "open-clip-torch>=2.24"]
-# Build Order step 2 (shot detection)
-shots = ["scenedetect[opencv]>=0.6.4"]
+# T11 (shot detection). PySceneDetect 0.7 dropped the [opencv] extra — pip
+# warns and installs nothing for it — so opencv-python is named directly.
+shots = ["scenedetect>=0.6.4", "opencv-python>=4.9"]
 # Build Order step 6 (captions)
 captions = ["faster-whisper>=1.0"]
 # Build Order step 5 (real API backend — never used in tests)

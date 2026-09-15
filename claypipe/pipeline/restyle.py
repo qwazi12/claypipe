@@ -89,15 +89,22 @@ def restyle_frames(
     controller: "object | None" = None,
     references: "list | None" = None,
     scores_path: Path | None = None,
+    boundary_frames: "set[int] | None" = None,
 ) -> int:
     """Restyle every source frame, scoring and retrying when a scorer is given.
 
     Resume-safe: an existing output is never re-generated, so a crashed run
     never re-spends (SPEC §2).
 
-    `seed_for` maps a 1-based frame index to a seed. Step 1 has no shot
-    detection yet, so the default is the whole clip as shot 0 (seed 1000).
-    Shot-aware seeding (seed = 1000 + shot_index) lands with shots.py.
+    `seed_for` maps a 1-based frame index to a seed. With a shot plan this is
+    `ShotPlan.seed_for_frame`, giving one fixed seed per shot; without one it
+    defaults to the whole clip as shot 0 (seed 1000).
+
+    `boundary_frames` (T11) is the set of 1-based indices that OPEN a shot. At
+    one of those the previous restyled frame belongs to a different scene, so
+    it is not handed to the scorer: a flow-warped residual across a hard cut
+    measures nothing and reads as catastrophic temporal failure. The frame is
+    scored as a first frame instead, which is exactly what it is.
 
     SCORING IS DELIBERATELY OPTIONAL, and is skipped for DummyBackend
     (memory.md D27). The dummy's entire visual difference from the source is a
@@ -116,6 +123,7 @@ def restyle_frames(
     done = 0
     skipped = 0
     retried = 0
+    boundaries = boundary_frames or set()
     previous_accepted: Path | None = None
 
     for idx, src in enumerate(frames, start=1):
@@ -146,10 +154,13 @@ def restyle_frames(
             if scorer is None or controller is None:
                 break
 
+            # A shot-opening frame has no comparable predecessor. See the
+            # boundary_frames note above — this is the D15/D34 fix.
+            predecessor = None if idx in boundaries else previous_accepted
             score = _score_and_record(
                 scorer=scorer, frame=src.name, source=src, restyled=dst,
-                references=references or [], previous=previous_accepted,
-                scores_path=scores_path,
+                references=references or [], previous=predecessor,
+                scores_path=scores_path, shot_boundary=idx in boundaries,
             )
             controller.observe(score)
             decision = controller.decide(score, base_seed=seed_for(idx))
@@ -185,6 +196,7 @@ def restyle_frames(
         total=len(frames),
         strength=strength,
         scored=scorer is not None,
+        shot_boundaries=len(boundaries),
         est_cost_usd=round(done * backend.cost_per_frame_usd(), 4),
     )
     return len(frames)
@@ -193,6 +205,7 @@ def restyle_frames(
 def _score_and_record(
     *, scorer, frame: str, source: Path, restyled: Path,
     references: list, previous: Path | None, scores_path: Path | None,
+    shot_boundary: bool = False,
 ):
     """Score one frame and append it to scores.jsonl (SPEC §3)."""
     from .score import load_image
@@ -206,8 +219,12 @@ def _score_and_record(
     )
     if scores_path is not None:
         scores_path.parent.mkdir(parents=True, exist_ok=True)
+        record = score.to_dict()
+        # Recorded so a reviewer reading scores.jsonl can see WHY a frame's TF
+        # is the first-frame value rather than a measurement (T11).
+        record["shot_boundary"] = shot_boundary
         with scores_path.open("a") as fh:
-            fh.write(json.dumps(score.to_dict()) + "\n")
+            fh.write(json.dumps(record) + "\n")
     return score
 
 # --------------------------------------------------------------------------

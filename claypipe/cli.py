@@ -19,6 +19,7 @@ from .config import ConfigError, load_all
 from .pipeline import assemble as assemble_stage
 from .pipeline import qccard
 from .pipeline.extract import count_frames, extract_audio, extract_frames, frame_paths
+from .pipeline import shots
 from .pipeline.layout import LayoutError, source_aspect_of
 from .pipeline.restyle import get_backend, restyle_frames
 from .pipeline.retry import RetryController
@@ -224,6 +225,43 @@ def _effective_prompt(run: Run, profile) -> str:
     return override
 
 
+def _build_shot_plan(run: Run, extracted: int):
+    """The run's shot plan (T11): detected once, then reused.
+
+    A cached plan is reused only if it was built for this many frames at this
+    fps — otherwise it belongs to a different extraction and its boundaries are
+    in the wrong places. PySceneDetect absent is a REFUSAL, not a fallback to
+    one whole-clip shot: that fallback would silently restore per-clip seeding
+    and the false temporal flags at every cut, which is the bug T11 exists to
+    fix. `--single-shot` is the explicit escape hatch.
+    """
+    path = run.paths.shot_plan
+    if path.is_file():
+        try:
+            cached = shots.ShotPlan.read(path)
+        except Exception as exc:
+            run.logger.warn("shots.cache_unreadable", path=str(path), error=str(exc))
+        else:
+            if cached.total_frames == extracted and cached.fps == run.manifest.fps:
+                run.logger.info("shots.reused", **cached.summary())
+                return cached
+            run.logger.warn(
+                "shots.cache_stale",
+                cached_frames=cached.total_frames, extracted=extracted,
+                cached_fps=cached.fps, fps=run.manifest.fps,
+            )
+
+    plan = shots.detect_shots(
+        video=Path(run.manifest.source_path),
+        fps=run.manifest.fps,
+        total_frames=extracted,
+        frames_dir=run.paths.source_frames,
+    )
+    plan.write(path)
+    run.logger.info("shots.detected", **plan.summary())
+    return plan
+
+
 def _build_scoring(run: Run, weights, backend, frame_count: int, profile):
     """Build the Scorer and RetryController — except on the dummy backend.
 
@@ -337,6 +375,13 @@ def batch(
              "immediately when it is absent. Useful when the operator is "
              "reviewing the page in another window.",
     ),
+    single_shot: bool = typer.Option(
+        False, "--single-shot",
+        help="Treat the whole clip as one shot: one seed throughout, and no "
+             "boundary-aware temporal scoring. The explicit escape hatch for "
+             "a clip with no cuts, or when PySceneDetect is unavailable. "
+             "Logged as a warning — it disables the T11 fixes.",
+    ),
 ) -> None:
     """STAGE 2 — extract frames + audio, then restyle every frame.
 
@@ -391,6 +436,24 @@ def batch(
         run.logger.error("batch.failed", error=str(exc))
         _fail(str(exc))
 
+    # T11: shot boundaries drive the seed (one fixed seed per shot) and tell the
+    # scorer where NOT to measure temporal drift. Detected after extraction,
+    # because motion ranking reads the extracted frames.
+    if single_shot:
+        plan = shots.single_shot_plan(extracted, run.manifest.fps)
+        plan.write(run.paths.shot_plan)
+        run.logger.warn(
+            "shots.single_shot_forced",
+            reason="--single-shot given; per-shot seeding and boundary-aware "
+                   "temporal scoring are BOTH disabled for this run",
+            **plan.summary(),
+        )
+    else:
+        try:
+            plan = _build_shot_plan(run, extracted)
+        except shots.ShotDetectionError as exc:
+            _fail(str(exc))
+
     scorer, controller, references = _build_scoring(run, weights, backend, extracted, profile)
 
     try:
@@ -401,6 +464,8 @@ def batch(
             prompt=prompt,
             strength=profile.strength,
             logger=run.logger,
+            seed_for=plan.seed_for_frame,
+            boundary_frames=plan.boundary_frames(),
             ledger=ledger,
             scorer=scorer,
             controller=controller,
@@ -487,22 +552,41 @@ def _load_run_for(run_dir: Path, runs_dir: Optional[Path], styles) -> tuple[Run,
         _fail(str(exc))
 
 
-def _canary_frame_names(frames: list[Path]) -> list[Path]:
+def _canary_frame_names(frames: list[Path], plan=None) -> tuple[list[Path], str]:
     """The three representative frames (SPEC §4.1): first, middle, most-motion.
 
-    MOST-MOTION IS NOT YET AVAILABLE — shot detection (`shots.py`) has no build
-    step assigned, so the third slot is the LAST frame, which at least samples
-    the far end of the clip. This is a stated stand-in, not a silent one: the
-    page labels it, and it changes to the most-motion shot when shots.py lands.
+    D30 CLOSED by T11. The third slot was the LAST frame as a stated stand-in
+    because shot detection did not exist. It is now the middle of the busiest
+    shot, ranked by mean inter-frame difference over the SOURCE frames — the
+    operator is choosing which moment to inspect, and that choice must not
+    depend on what the backend already did to it.
+
+    Without a shot plan (a pre-T11 run, or `--single-shot`) the stand-in is
+    kept and the caption still says so. It is never silently the wrong frame.
     """
     if not frames:
-        return []
+        return [], CANARY_CAPTION_STANDIN
     if len(frames) <= 3:
-        return frames
-    return [frames[0], frames[len(frames) // 2], frames[-1]]
+        return frames, CANARY_CAPTION_STANDIN
+
+    third = frames[-1]
+    caption = CANARY_CAPTION_STANDIN
+    if plan is not None and plan.shots:
+        try:
+            index = plan.most_motion_frame()
+        except shots.ShotDetectionError:
+            index = None
+        if index is not None and 1 <= index <= len(frames):
+            shot = plan.shot_for_frame(index)
+            third = frames[index - 1]
+            caption = (
+                f"most-motion shot ({shot.index} of {len(plan.shots)}, "
+                f"{shot.duration_s:.2f}s, motion {shot.motion:.2f})"
+            )
+    return [frames[0], frames[len(frames) // 2], third], caption
 
 
-CANARY_CAPTIONS = ("first frame", "middle frame", "last frame (stand-in for most-motion)")
+CANARY_CAPTION_STANDIN = "last frame (stand-in: no shot plan for this run)"
 
 
 @canary_app.command("render")
@@ -526,12 +610,19 @@ def canary_render(
         )
 
     scores = _load_scores(run)
-    chosen = _canary_frame_names(restyled)
+    plan = None
+    if run.paths.shot_plan.is_file():
+        try:
+            plan = shots.ShotPlan.read(run.paths.shot_plan)
+        except Exception as exc:
+            run.logger.warn("canary.shot_plan_unreadable", error=str(exc))
+    chosen, third_caption = _canary_frame_names(restyled, plan)
+    captions = ("first frame", "middle frame", third_caption)
     cards = [
         canary_page.CanaryCard(
             name=path.name, image=path, score=scores.get(path.name), caption=caption
         )
-        for path, caption in zip(chosen, CANARY_CAPTIONS)
+        for path, caption in zip(chosen, captions)
     ]
     page = canary_page.write_canary_page(
         run.paths.root,
@@ -541,7 +632,10 @@ def canary_render(
         cards=cards,
         prompt=_effective_prompt(run, styles.profile(run.manifest.style)),
     )
-    run.logger.info("canary.render", path=str(page), frames=len(cards), scored=bool(scores))
+    run.logger.info(
+        "canary.render", path=str(page), frames=len(cards), scored=bool(scores),
+        third_slot=third_caption, shot_plan=plan is not None,
+    )
     typer.echo(page)
 
     if scores:
