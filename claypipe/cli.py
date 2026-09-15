@@ -19,6 +19,7 @@ from .config import ConfigError, load_all
 from .pipeline import assemble as assemble_stage
 from .pipeline import qccard
 from .pipeline.extract import count_frames, extract_audio, extract_frames, frame_paths
+from .pipeline.layout import LayoutError, source_aspect_of
 from .pipeline.restyle import get_backend, restyle_frames
 from .pipeline.retry import RetryController
 from .pipeline.score import Scorer, ScoringError, load_image
@@ -87,7 +88,19 @@ def intake(
     try:
         duration = ffmpeg.duration_seconds(video)
         ffmpeg.stream(video, "audio")  # a clip with no audio cannot be assembled
+        # T9: the source's pixel dimensions ARE part of run identity — the
+        # layout engine derives panel height and margins from this aspect
+        # ratio. Probed once here so assembly never has to guess, and so a
+        # source whose aspect cannot make a two-panel stack is refused at
+        # intake rather than after the frames have been paid for.
+        video_stream = ffmpeg.stream(video, "video")
+        source_width, source_height = int(video_stream["width"]), int(video_stream["height"])
     except ffmpeg.FFmpegError as exc:
+        _fail(str(exc))
+
+    try:
+        layout = styles.render.layout_for(source_aspect_of(source_width, source_height))
+    except LayoutError as exc:
         _fail(str(exc))
 
     for image in ref:
@@ -101,6 +114,8 @@ def intake(
         backend=backend,
         clip_title=title or video.stem,
         duration_s=duration,
+        source_width=source_width,
+        source_height=source_height,
         styles=styles,
         runs_dir=runs_dir,
     )
@@ -115,6 +130,8 @@ def intake(
         backend=backend,
         duration_s=duration,
         references=len(ref),
+        source_size=f"{source_width}x{source_height}",
+        **layout.as_dict(),
     )
     typer.echo(run.paths.root)
 

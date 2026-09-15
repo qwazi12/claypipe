@@ -40,6 +40,10 @@ def _make_run(test_clip: Path, run_dir: Path, style: str = "clay") -> tuple[Run,
         backend="dummy",
         clip_title="Test Clip",
         duration_s=ffmpeg.duration_seconds(test_clip),
+        # T9: the layout engine needs the source's aspect ratio. The test clip
+        # is 1280x720, so the derived stack is 316/608/72/608/316.
+        source_width=1280,
+        source_height=720,
         styles=styles,
         runs_dir=run_dir,
         echo=False,
@@ -155,6 +159,7 @@ def test_audio_hash_mismatch_is_a_hard_fail(test_clip: Path, run_dir: Path) -> N
             extracted_audio_md5="0" * 32,
             expected_frames=EXPECTED_FRAMES,
             render=styles.render,
+            layout=assemble_stage.layout_for_run(run, styles.render),
             logger=run.logger,
         )
 
@@ -292,3 +297,140 @@ def test_cli_rejects_unknown_style(test_clip: Path, run_dir: Path) -> None:
     )
     assert result.exit_code == 1
     assert "unknown style" in result.output
+
+
+# ---------------------------------------------------------------------------
+# T9 — the derived layout, asserted on the rendered PIXELS, not on the config.
+# ---------------------------------------------------------------------------
+
+EXPECTED_BANDS_16X9 = {
+    "top_margin": 316,
+    "panel_height": 608,
+    "gap_height": 72,
+    "bottom_margin": 316,
+}
+
+
+def _background_bands(video: Path, bg_hex: str) -> list[tuple[str, int, int]]:
+    """Row runs of one rendered frame, classified as background or content.
+
+    Reads the actual pixels rather than trusting the filtergraph, because the
+    failure this guards against — a panel scaled to the wrong height, or an
+    overlay landing at the wrong y — produces a file that plays fine and is
+    wrong. Only the pixels can tell you.
+    """
+    import subprocess
+
+    import numpy as np
+
+    width, height = 1080, 1920
+    tools = ffmpeg.require_ffmpeg()
+    proc = subprocess.run(
+        [tools.ffmpeg, "-v", "error", "-ss", "2", "-i", str(video), "-frames:v", "1",
+         "-f", "rawvideo", "-pix_fmt", "rgb24", "-"],
+        capture_output=True,
+    )
+    frame = np.frombuffer(proc.stdout, np.uint8)[: width * height * 3]
+    frame = frame.reshape(height, width, 3).astype(int)
+    bg = np.array([int(bg_hex[i : i + 2], 16) for i in (1, 3, 5)])
+    # h264 at crf 18 moves a flat colour by a few levels; 14 is well inside the
+    # gap between "this is the background" and "this is picture".
+    is_bg = (np.abs(frame - bg).max(axis=2) < 14).mean(axis=1) > 0.995
+
+    runs: list[tuple[str, int, int]] = []
+    y = 0
+    while y < height:
+        kind = "bg" if is_bg[y] else "content"
+        start = y
+        while y < height and (("bg" if is_bg[y] else "content") == kind):
+            y += 1
+        runs.append((kind, start, y - 1))
+    return runs
+
+
+def test_t9_rendered_bands_match_the_derived_layout(test_clip: Path, run_dir: Path) -> None:
+    """The T9 acceptance test. A 1280x720 (16:9) source must render as
+    316 / 608 / 72 / 608 / 316, measured off the output frame."""
+    run, styles = _make_run(test_clip, run_dir)
+    audio_md5 = _batch(run, styles, test_clip)
+    profile = styles.profile(run.manifest.style)
+    assemble_stage.assemble(run, styles.render, profile, audio_md5)
+
+    runs = _background_bands(run.paths.final, profile.background_color)
+    # The two panels are the two tallest content bands; the header's lettering
+    # is a third, much shorter content band inside the top margin.
+    content = sorted(
+        ((e - s + 1, s, e) for kind, s, e in runs if kind == "content"), reverse=True
+    )
+    assert len(content) >= 2, f"expected two panels, got bands {runs}"
+    (h_top, top_start, top_end), (h_bot, bot_start, bot_end) = sorted(
+        content[:2], key=lambda b: b[1]
+    )
+
+    assert h_top == EXPECTED_BANDS_16X9["panel_height"]
+    assert h_bot == EXPECTED_BANDS_16X9["panel_height"]
+    assert top_start == EXPECTED_BANDS_16X9["top_margin"]
+    assert bot_start - top_end - 1 == EXPECTED_BANDS_16X9["gap_height"]
+    assert 1920 - 1 - bot_end == EXPECTED_BANDS_16X9["bottom_margin"]
+    # And the whole stack closes on the canvas.
+    assert (
+        top_start
+        + h_top
+        + EXPECTED_BANDS_16X9["gap_height"]
+        + h_bot
+        + EXPECTED_BANDS_16X9["bottom_margin"]
+        == 1920
+    )
+
+
+def test_t9_header_lettering_sits_inside_the_top_margin(
+    test_clip: Path, run_dir: Path
+) -> None:
+    """The header is the top margin — its type must not spill into the panel."""
+    run, styles = _make_run(test_clip, run_dir)
+    audio_md5 = _batch(run, styles, test_clip)
+    profile = styles.profile(run.manifest.style)
+    layout = assemble_stage.layout_for_run(run, styles.render)
+    assemble_stage.assemble(run, styles.render, profile, audio_md5)
+
+    runs = _background_bands(run.paths.final, profile.background_color)
+    lettering = [
+        (s, e) for kind, s, e in runs if kind == "content" and (e - s + 1) < 200
+    ]
+    assert lettering, f"no header lettering found in {runs}"
+    for start, end in lettering:
+        assert end < layout.restyled_y, (
+            f"header lettering at y={start}-{end} overlaps the restyled panel "
+            f"which starts at y={layout.restyled_y}"
+        )
+
+
+def test_t9_layout_is_reported_in_the_verification_record(
+    test_clip: Path, run_dir: Path
+) -> None:
+    """Rule 40: geometry is reported, never implied."""
+    run, styles = _make_run(test_clip, run_dir)
+    audio_md5 = _batch(run, styles, test_clip)
+    result = assemble_stage.assemble(
+        run, styles.render, styles.profile(run.manifest.style), audio_md5
+    )
+    assert result["layout"]["panel_height"] == 608
+    assert result["layout"]["top_margin"] == 316
+    assert result["layout"]["gap_height"] == 72
+
+
+def test_t9_pre_t9_run_reprobes_the_source_instead_of_guessing(
+    test_clip: Path, run_dir: Path
+) -> None:
+    """A run.json written before T9 has no source dimensions. Assembly must
+    re-probe and warn — never fall back to a canvas-shaped guess, because a
+    wrong aspect crops picture away and still produces a plausible video."""
+    run, styles = _make_run(test_clip, run_dir)
+    run.manifest.source_width = 0
+    run.manifest.source_height = 0
+    run.save()
+
+    layout = assemble_stage.layout_for_run(run, styles.render)
+    assert layout.panel_height == 608  # re-probed 1280x720, not guessed
+    logged = [json.loads(line) for line in run.paths.log.read_text().splitlines()]
+    assert any(e["event"] == "assemble.layout.reprobed" for e in logged)

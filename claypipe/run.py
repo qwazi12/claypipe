@@ -48,6 +48,12 @@ class RunManifest(BaseModel):
     source_path: str
     source_sha256: str
     source_duration_s: float
+    # T9: the layout engine derives panel height from the source's aspect
+    # ratio, so the source's pixel dimensions are run identity, decided once at
+    # intake. Zero means a run created before T9 — assembly re-probes and warns
+    # rather than guessing a geometry.
+    source_width: int = 0
+    source_height: int = 0
     clip_title: str
     style: str
     fps: int
@@ -143,6 +149,8 @@ class Run:
         backend: str,
         clip_title: str,
         duration_s: float,
+        source_width: int = 0,
+        source_height: int = 0,
         styles: StylesConfig,
         runs_dir: Path | None = None,
         echo: bool = True,
@@ -158,6 +166,8 @@ class Run:
             source_path=str(source.resolve()),
             source_sha256=sha256_file(source),
             source_duration_s=duration_s,
+            source_width=source_width,
+            source_height=source_height,
             clip_title=clip_title,
             style=style,
             fps=fps,

@@ -48,11 +48,30 @@ def test_thresholds_must_be_ordered() -> None:
         WeightsConfig.model_validate(raw)
 
 
-def test_render_geometry_must_close() -> None:
-    """header + 2*panel + divider must equal the canvas height, or startup fails."""
+def test_retired_fixed_geometry_is_rejected_outright() -> None:
+    """T9 replaced header/panel/divider heights with a derived layout. The model
+    is `extra: forbid`, so a styles.yaml still carrying the old keys is a
+    startup crash naming them — not a file that loads and quietly ignores the
+    geometry the operator thought they were setting."""
     raw = yaml.safe_load(Path("styles.yaml").read_text())
     raw["render"]["panel_height"] = 800
-    with pytest.raises(Exception, match="geometry does not close"):
+    with pytest.raises(Exception, match="panel_height"):
+        StylesConfig.model_validate(raw)
+
+
+def test_canvas_must_be_even() -> None:
+    """The one geometry check left in config: yuv420p needs even canvas dims.
+    Everything below the canvas is derived and checked in layout.py."""
+    raw = yaml.safe_load(Path("styles.yaml").read_text())
+    raw["render"]["height"] = 1921
+    with pytest.raises(Exception, match="must be even"):
+        StylesConfig.model_validate(raw)
+
+
+def test_gap_fraction_is_bounded() -> None:
+    raw = yaml.safe_load(Path("styles.yaml").read_text())
+    raw["render"]["caption_gap_fraction"] = 0.6
+    with pytest.raises(Exception):
         StylesConfig.model_validate(raw)
 
 

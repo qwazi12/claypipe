@@ -109,16 +109,16 @@ bottom    = remainder - top              # equals top when remainder % 4 == 0
 
 | Element | Rule | 16:9 source | 2.01:1 source |
 |---|---|---|---|
-| Top margin (header) | `even(remainder/2)` | 316 px | 396 px |
-| Panel (each) | `even(1080 / source_aspect)` | 608 px | 538 px |
+| Top margin (header) | `even(remainder/2)` | 316 px | 388 px |
+| Panel (each) | `even(1080 / source_aspect)` | 608 px | 536 px |
 | Caption gap | `even(0.037 * 1920)` | 72 px | 72 px |
-| Bottom margin | `remainder - top` | 316 px | 396 px |
+| Bottom margin | `remainder - top` | 316 px | 388 px |
 
 Every dimension is even, because `yuv420p` requires it, and the four terms sum
-to exactly 1920. Against the scaled measurement (panel 608/536, gap 71/60,
-margins 319/313 and 396/401) the derived values land within 3 px on panels and
-margins — inside measurement noise — and within 12 px on clip B's gap, which is
-the one place a single `gap_fraction` cannot fit both clips. Gap fraction is
+to exactly 1920. Against the scaled measurement (panel 609/536, gap 71/60,
+margins 319/313 and 396/401) the derived panels land within 1 px and the
+margins within 8 px — the margin gap being entirely clip B's caption band,
+which measures 0.0312 of canvas height against the configured 0.037. Gap fraction is
 config, not code, and is per-title tunable.
 
 ### 1.2 Cadence — the 12 fps decision, validated
@@ -619,7 +619,7 @@ already exist.
     "margins_are_derived_not_tabulated": true,
     "derived_examples": {
       "16x9":   { "panel_h": 608, "gap": 72, "top_margin": 316, "bottom_margin": 316 },
-      "2.01x1": { "panel_h": 538, "gap": 72, "top_margin": 396, "bottom_margin": 396 }
+      "2.01x1": { "panel_h": 536, "gap": 72, "top_margin": 388, "bottom_margin": 388 }
     },
     "measured_source_bands": {
       "clip_a_576x1024": { "top": 170, "panel": 325, "gap": 38, "panel2": 324, "bottom": 167 },
@@ -672,7 +672,7 @@ One commit per task with its own acceptance test, matching the T1-T8 convention.
 
 | # | Task | Acceptance |
 |---|---|---|
-| **T9** | **Layout engine rewrite.** Panel height from measured source aspect; block-centred; caption gap band; header into top-margin remainder via the PIL overlay path (D1). Retire fixed geometry. | 16:9 -> 608/72/316. 2.01:1 -> 538/72/396. Four terms sum to 1920, all even. |
+| **T9** | **Layout engine rewrite.** Panel height from measured source aspect; block-centred; caption gap band; header into top-margin remainder via the PIL overlay path (D1). Retire fixed geometry. | **DONE.** 16:9 -> 316/608/72/608/316. 2.014:1 -> 388/536/72/536/388. Four terms sum to 1920, all even, asserted on rendered pixels. |
 | **T10** | **Reference-from-canary (F1).** `canary submit` writes approved restyled frames to `refs/`; `batch` locks those. Closes D12. | Clay frames score ID >= 0.85 against canary refs. Source-frame refs warn at startup, not silently accept. |
 | **T11** | **`shots.py` (F2).** PySceneDetect boundaries; per-shot seeds; canary 3rd frame = real most-motion shot (closes D30); TF skips boundary frames. | 3-cut synthetic clip -> 4 shots, 4 seeds. Against clip A the detector finds 41+/-4 cuts. |
 | **T12** | **Captions as layout, not burn-in.** Whisper -> phrase cues -> rendered into the gap band by the PIL compositor. Non-dialogue cues preserved. | Audio MD5 unchanged after captioning. Caption never overlaps either panel. |

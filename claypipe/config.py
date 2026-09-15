@@ -28,28 +28,35 @@ class RenderConfig(BaseModel):
 
     width: int = Field(gt=0)
     height: int = Field(gt=0)
-    header_height: int = Field(gt=0)
-    panel_height: int = Field(gt=0)
-    divider_height: int = Field(ge=0)
+    # T9: panel and margin heights are DERIVED from the source clip's aspect
+    # ratio, not configured. See claypipe/pipeline/layout.py and MASTER_PLAN
+    # §1.1. The only vertical figure still under operator control is how much
+    # of the canvas the caption band gets.
+    caption_gap_fraction: float = Field(ge=0.0, lt=0.5)
     crf: int = Field(ge=0, le=51)
     pix_fmt: str
     default_fps: int = Field(gt=0)
     header_font_size: int = Field(gt=0)
+    caption_font_size: int = Field(gt=0)
     font_candidates: list[Path] = Field(min_length=1)
 
     @model_validator(mode="after")
-    def _geometry_closes(self) -> "RenderConfig":
-        total = self.header_height + 2 * self.panel_height + self.divider_height
-        if total != self.height:
-            raise ValueError(
-                f"render geometry does not close: header({self.header_height}) + "
-                f"2*panel({self.panel_height}) + divider({self.divider_height}) "
-                f"= {total}, expected height {self.height}"
-            )
-        for name in ("width", "height", "header_height", "panel_height", "divider_height"):
+    def _canvas_is_even(self) -> "RenderConfig":
+        for name in ("width", "height"):
             if getattr(self, name) % 2:
                 raise ValueError(f"render.{name} must be even for {self.pix_fmt}")
         return self
+
+    def layout_for(self, source_aspect: float):
+        """Resolve the vertical stack for a source of this aspect ratio."""
+        from .pipeline.layout import compute_layout
+
+        return compute_layout(
+            canvas_width=self.width,
+            canvas_height=self.height,
+            source_aspect=source_aspect,
+            gap_fraction=self.caption_gap_fraction,
+        )
 
     def font_path(self) -> Path:
         """First existing font candidate. No silent fallback to a default font."""

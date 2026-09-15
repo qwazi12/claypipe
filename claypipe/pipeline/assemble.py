@@ -10,6 +10,11 @@ Two hard failures live here, and neither is a warning:
 Header note: SPEC §6 says `drawtext`, but ffmpeg builds vary and the installed
 one has no such filter, so the header bar is rendered to a PNG with PIL and
 composited with `overlay` (memory.md D1). Same output, no build dependency.
+
+T9: the vertical stack is no longer a set of configured heights. `layout.py`
+derives panel height from the SOURCE's aspect ratio, centres the panel pair as
+a block, and hands the top margin to the header. Nothing in this module may
+hardcode a band height — ask the Layout.
 """
 
 from __future__ import annotations
@@ -23,6 +28,7 @@ from ..config import RenderConfig, StyleProfile, hex_to_rgb
 from ..logging import RunLogger
 from ..run import Run
 from .extract import count_frames
+from .layout import Layout, source_aspect_of
 
 
 class AssemblyError(RuntimeError):
@@ -30,17 +36,18 @@ class AssemblyError(RuntimeError):
 
 
 def render_header(
-    dst: Path, title: str, render: RenderConfig, profile: StyleProfile
+    dst: Path, title: str, render: RenderConfig, profile: StyleProfile,
+    layout: Layout,
 ) -> Path:
-    """The branded header bar, as an image."""
-    size = (render.width, render.header_height)
+    """The branded header bar, as an image, sized to the derived top margin."""
+    size = (layout.canvas_width, layout.header_height)
     img = Image.new("RGB", size, hex_to_rgb(profile.background_color))
     draw = ImageDraw.Draw(img)
     font = ImageFont.truetype(str(render.font_path()), render.header_font_size)
 
     text = title.upper()
     # Shrink to fit rather than overflow the bar.
-    while draw.textlength(text, font=font) > render.width * 0.92 and font.size > 12:
+    while draw.textlength(text, font=font) > layout.canvas_width * 0.92 and font.size > 12:
         font = ImageFont.truetype(str(render.font_path()), font.size - 2)
 
     left, top, right, bottom = draw.textbbox((0, 0), text, font=font)
@@ -95,12 +102,18 @@ def _count_video_frames(path: Path) -> int:
     return int(proc.stdout.strip())
 
 
-def _panel_filter(render: RenderConfig) -> str:
-    """Crop the central action band at the panel's aspect, then scale to it.
+def _panel_filter(layout: Layout) -> str:
+    """Crop to the panel's aspect, then scale to it.
 
-    Never stretches: the crop preserves aspect, the scale is then exact.
+    Since T9 the panel aspect IS the source aspect, so for a normal run this
+    crop is a no-op and the whole frame survives — which is the point: the old
+    fixed 882px panel cropped real picture away from every source that was not
+    1080x882. The crop stays as the safety net for the case where the two
+    aspects disagree (a forced canvas, or a source whose aspect was overridden),
+    because a mismatched scale would stretch faces and nothing downstream would
+    catch it.
     """
-    w, h = render.width, render.panel_height
+    w, h = layout.canvas_width, layout.panel_height
     return (
         f"crop=w=trunc(min(iw\\,ih*{w}/{h})/2)*2:"
         f"h=trunc(min(ih\\,iw*{h}/{w})/2)*2:"
@@ -118,16 +131,17 @@ def build_comparison(
     dst: Path,
     render: RenderConfig,
     profile: StyleProfile,
+    layout: Layout,
     fps: int,
     frames: int,
     subtitles: Path | None,
     logger: RunLogger,
 ) -> Path:
-    """The 9:16 stack: header bar, restyled on top, original below."""
-    top_y = render.header_height
-    bottom_y = render.header_height + render.panel_height + render.divider_height
+    """The 9:16 stack: header bar, restyled on top, caption gap, original below."""
+    top_y = layout.restyled_y
+    bottom_y = layout.original_y
     bg = "0x" + profile.background_color.lstrip("#")
-    panel = _panel_filter(render)
+    panel = _panel_filter(layout)
 
     # The canvas is built with `pad` around the top panel rather than from a
     # `color` source. A colour generator is an INFINITE input: overlaying finite
@@ -135,7 +149,7 @@ def build_comparison(
     # before this was changed. Padding a finite input keeps the whole graph
     # bounded by the restyled video's own length.
     graph = (
-        f"[0:v]{panel},pad={render.width}:{render.height}:0:{top_y}:color={bg}[base];"
+        f"[0:v]{panel},pad={layout.canvas_width}:{layout.canvas_height}:0:{top_y}:color={bg}[base];"
         f"[1:v]{panel}[bot];"
         f"[base][bot]overlay=x=0:y={bottom_y}[s2];"
         f"[s2][2:v]overlay=x=0:y=0:eof_action=repeat[hdr]"
@@ -177,8 +191,9 @@ def build_comparison(
     logger.info(
         "assemble.rendered",
         path=str(dst),
-        size=f"{render.width}x{render.height}",
+        size=f"{layout.canvas_width}x{layout.canvas_height}",
         captions=bool(subtitles),
+        **layout.as_dict(),
     )
     return dst
 
@@ -190,6 +205,7 @@ def verify_output(
     extracted_audio_md5: str,
     expected_frames: int,
     render: RenderConfig,
+    layout: Layout,
     logger: RunLogger,
 ) -> dict:
     """Post-render acceptance checks. Any failure raises — never a warning.
@@ -201,9 +217,15 @@ def verify_output(
     audio = ffmpeg.stream(dst, "audio")
 
     width, height = int(video["width"]), int(video["height"])
-    if (width, height) != (render.width, render.height):
+    if (width, height) != (layout.canvas_width, layout.canvas_height):
         raise AssemblyError(
-            f"output is {width}x{height}, expected {render.width}x{render.height}"
+            f"output is {width}x{height}, expected "
+            f"{layout.canvas_width}x{layout.canvas_height}"
+        )
+    if not layout.closes():
+        raise AssemblyError(
+            f"layout does not close: {layout.top_margin} + 2*{layout.panel_height} "
+            f"+ {layout.gap_height} + {layout.bottom_margin} != {layout.canvas_height}"
         )
 
     actual_frames = _count_video_frames(dst)
@@ -234,14 +256,44 @@ def verify_output(
         "frames_expected": expected_frames,
         "frames_actual": actual_frames,
         "duration_s": ffmpeg.duration_seconds(dst),
+        "layout": layout.as_dict(),
     }
     logger.info("assemble.verified", **result)
     return result
 
 
+def layout_for_run(run: Run, render: RenderConfig) -> Layout:
+    """The run's vertical geometry, derived from its SOURCE's aspect ratio.
+
+    Dimensions are recorded at intake. A run created before T9 has none, so the
+    source is re-probed and the gap is logged as a warning — never silently
+    defaulted to some canvas-shaped guess, because a wrong aspect here crops
+    picture away and still produces a plausible-looking video.
+    """
+    m = run.manifest
+    width, height = m.source_width, m.source_height
+    if width <= 0 or height <= 0:
+        stream = ffmpeg.stream(Path(m.source_path), "video")
+        width, height = int(stream["width"]), int(stream["height"])
+        run.logger.warn(
+            "assemble.layout.reprobed",
+            reason="run.json predates T9 and records no source dimensions",
+            source_width=width,
+            source_height=height,
+        )
+    layout = render.layout_for(source_aspect_of(width, height))
+    run.logger.info(
+        "assemble.layout",
+        source=f"{width}x{height}",
+        **layout.as_dict(),
+    )
+    return layout
+
+
 def assemble(run: Run, render: RenderConfig, profile: StyleProfile, source_audio_md5: str) -> dict:
     """Full assembly stage for a run."""
     p = run.paths
+    layout = layout_for_run(run, render)
     extracted = count_frames(p.source_frames)
     restyled = count_frames(p.restyled_frames)
     if extracted != restyled:
@@ -254,7 +306,7 @@ def assemble(run: Run, render: RenderConfig, profile: StyleProfile, source_audio
     frames = encode_frames_to_video(
         p.restyled_frames, p.restyled_video, run.manifest.fps, render, run.logger
     )
-    render_header(p.header_png, run.manifest.clip_title, render, profile)
+    render_header(p.header_png, run.manifest.clip_title, render, profile, layout)
     build_comparison(
         restyled_video=p.restyled_video,
         source_video=Path(run.manifest.source_path),
@@ -263,6 +315,7 @@ def assemble(run: Run, render: RenderConfig, profile: StyleProfile, source_audio
         dst=p.final,
         render=render,
         profile=profile,
+        layout=layout,
         fps=run.manifest.fps,
         frames=frames,
         subtitles=p.subtitles if p.subtitles.is_file() else None,
@@ -274,5 +327,6 @@ def assemble(run: Run, render: RenderConfig, profile: StyleProfile, source_audio
         extracted_audio_md5=source_audio_md5,
         expected_frames=frames,
         render=render,
+        layout=layout,
         logger=run.logger,
     )

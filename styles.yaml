@@ -5,16 +5,22 @@
 version: 1
 
 render:
-  # 9:16 canvas. header + panel + divider + panel MUST equal height.
+  # 9:16 canvas. Panel heights and margins are DERIVED from each source clip's
+  # own aspect ratio at render time — see claypipe/pipeline/layout.py and
+  # MASTER_PLAN §1.1. There is deliberately no panel_height here: a 16:9 source
+  # and a 2.01:1 source need different ones, and the reference clips prove it.
   width: 1080
   height: 1920
-  header_height: 130
-  panel_height: 882
-  divider_height: 26
+  # The caption band between the two panels, as a fraction of canvas height.
+  # Measured on the reference clips: 0.0371 (New Girl, 16:9) and 0.0312
+  # (Reacher, 2.01:1). One value cannot fit both exactly; 0.037 favours the
+  # denser-captioned case, and this is per-title tunable.
+  caption_gap_fraction: 0.037
   crf: 18
   pix_fmt: yuv420p
   default_fps: 12
   header_font_size: 54
+  caption_font_size: 40
   # First existing path wins. Startup fails loudly if none exist.
   font_candidates:
     - /System/Library/Fonts/Supplemental/Arial Bold.ttf
