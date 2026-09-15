@@ -1,6 +1,25 @@
 # MEMORY — ClayPipe
 
 ## Current State
+- **MASTER_PLAN.md is now the single build plan.** It supersedes the three
+  working-note briefs. Scope: Track A (per-frame surface restyle) + Track C
+  (video-native resynthesis). Track B (3D character replacement) is OUT OF
+  SCOPE and recorded in MASTER_PLAN §9 so it is not re-litigated.
+- **TARGET LOOK IS CLAYMATION (operator, 2026-09-14).** The two @trevorcarlee
+  reference clips are LEGO-minifig restyles. They are the reference for FORMAT,
+  LAYOUT, CADENCE and METHOD — never for the look. See D40.
+- **PHASE 1 OF MASTER_PLAN §8 IS COMPLETE: T9, T10, T11, T12.** pytest 299
+  passed / 3 skipped / 0 failed. The 3 skips are real-footage measurements that
+  skip unless CLAYPIPE_REFERENCE_CLIP_A/B point at the reference clips.
+- Phase 2 (T13-T19) is NOT started. T13/T14/T15/T18 are pure local code and
+  unblocked. T16 needs real spend (and B1 settled). T19 needs a Modal account.
+- Phases 3-4 (T20-T24) not started. T21/T22 need a Railway account decision
+  (B3). T24 is blocked on B2.
+- **FAL_KEY is installed locally** at `.env` (gitignored, mode 600, verified
+  absent from `git ls-files`). B1 — whether that key is NEW rather than the one
+  disclosed in D36 — is the operator's to confirm.
+
+## Prior state (pre-2026-09-14)
 - **Steps 1-4 of 6 are COMPLETE and green.** 131 tests pass warm;
   97 pass / 34 skip / 0 fail on a cold clone.
 - Step 4 shipped `claypipe/verdi/` — two self-contained review pages and the
@@ -419,7 +438,212 @@
      implicitly. It prints to stdout unless `--out` is given; the transcript
      passes `--out` explicitly.
 
+- **D40 (2026-09-14, OPERATOR DIRECTION) The target look is CLAYMATION; the
+  reference clips are LEGO.** The two @trevorcarlee clips drive format, layout,
+  cadence and method. They do NOT drive the aesthetic. Plasticine puppets with
+  visible fingerprints and tool marks, seams where limbs meet the body, matte
+  surfaces with slight subsurface warmth. Two consequences worth recording,
+  because they change what is worth building:
+  (a) **Clay tolerates geometry drift; plastic does not.** A minifig is a
+      manufactured object — a head 5% too tall, or a claw hand with four
+      fingers, reads instantly as wrong. A clay puppet is handmade by
+      definition, so the same generative variance reads as craft. That moves a
+      chunk of Track B's difficulty into Track A/C's reach.
+  (b) **On-twos stepping is native to clay.** Stop-motion IS clay animation's
+      real production constraint, so the 12fps cadence stops being a cost
+      compromise that happens to look stylish and becomes the medium's
+      signature.
+  `styles.yaml` already ships a `lego` profile. It stays (it costs nothing and
+  the format works for it), but `clay` is the target. Do not spend effort on
+  minifig-specific prompt work.
+- **D41 (2026-09-14) THE REFERENCE MEASUREMENTS, RE-VERIFIED INDEPENDENTLY.**
+  Every number in MASTER_PLAN §1 was re-measured from the two source files this
+  session. Reproduced exactly: 576x1024 @ 24.000fps, 2094f/87.28s (clip A, New
+  Girl) and 1495f/62.29s (clip B, Reacher); band geometry within 3px; 41 and 14
+  cuts by coarse mean-delta. THREE CORRECTIONS came out of it:
+  1. **The plan's normalised 1080x1920 layout table did not close.** It gave
+     16:9 as 321+608+71+608+313 = **1921**, one pixel over the canvas, and its
+     asymmetric margins contradicted its own `block_centered` rule. Margins are
+     now DERIVED, never tabulated (see D42).
+  2. **Clip B's mean shot length is 4.15s, not 2.35s.** 14 cuts in 62.29s is 15
+     shots. The correction STRENGTHENS the case for adaptive keyframing: a
+     0.46s median against a 4.15s mean means clip B is mostly long dialogue
+     holds punctuated by very short bursts.
+  3. **Cadence measured 11.1/11.2 effective fps** with the 2-frame gap dominant
+     in both clips (150/219 and 139/222 changed-frame gaps). On-twos confirmed
+     to the frame. 12fps is correct and must not be changed.
+- **D42 (2026-09-14, T9) THE CANVAS IS DERIVED FROM THE SOURCE'S ASPECT RATIO,
+  NOT CONFIGURED.** `render.header_height`, `panel_height` and `divider_height`
+  are DELETED from styles.yaml and RenderConfig, along with the
+  `_geometry_closes` validator. `claypipe/pipeline/layout.py` computes:
+      panel_h   = even(canvas_width / source_aspect)
+      gap       = even(gap_fraction * canvas_height)
+      remainder = canvas_height - 2*panel_h - gap
+      top       = even(remainder / 2)      <- the header bar is drawn here
+      bottom    = remainder - top
+  16:9 -> 316/608/72/608/316. 2.014:1 -> 388/536/72/536/388. Both sum to 1920,
+  every term even (yuv420p subsamples chroma 2x2). Verified on RENDERED PIXELS,
+  not on config.
+  **Why this is not a refactor:** the old fixed 882px panel cropped real picture
+  away from BOTH reference aspects. The crop in `_panel_filter` is now a no-op
+  for a normal run and stays only as the safety net for a forced aspect.
+  `RunManifest.source_width/height` became run identity, probed once at intake.
+  A run.json written before T9 has none, so `layout_for_run` re-probes and logs
+  `assemble.layout.reprobed` — never a canvas-shaped guess, because a wrong
+  aspect crops picture and still produces a video that plays fine.
+  `caption_gap_fraction` (0.037) replaced `divider_height`: the caption band is
+  a first-class layout band now, because T12 draws captions INTO it.
+- **D43 (2026-09-14, T10) IDENTITY REFERENCES ARE THE APPROVED CANARY OUTPUT,
+  NOT SOURCE STILLS. This would have broken the first paid run.** MEASURED on a
+  real 20s slice of clip A — restyled frames scored against each kind of
+  reference:
+      vs CANARY refs : 0.907  0.867  0.958  0.839
+      vs SOURCE refs : 0.646  0.535  0.655  0.579    (targets.id_min = 0.85)
+  Every source-referenced frame MISSES the target. The failure chain was:
+  miss id_min -> BORDERLINE (D13) -> retry at strength -0.10 (D18) -> 15% retry
+  budget exhausted around frame 107 -> the backend gets blamed. The plan
+  predicted 0.65-0.82 for the photoreal case; the measurement is 0.53-0.65,
+  WORSE than predicted — and this is the dummy backend, which barely alters the
+  picture. A real restyle moves CLIP embeddings further, so the effect grows.
+  `canary submit` on a FULL approval copies the approved frames into `refs/` and
+  sets `reference_origin="canary"`. "adjust" locks nothing (the look is about to
+  change, so locking it locks the wrong target); rejection locks nothing.
+  Individually rejected frames are excluded; a re-submission REPLACES the lock
+  rather than accumulating, or the ID target averages the approved look against
+  a superseded one.
+  **DO NOT "FIX" THIS BY LOWERING id_min.** That trades a calibration bug for a
+  blind gate. An intake-origin reference now WARNS at startup (naming the
+  consequence and the fix) rather than refusing — holding a restyle to a
+  photoreal reference is a legitimate if expensive choice, but it must be a
+  choice, not a default discovered at frame 107.
+  **D12 CLOSED by this.** "How does a style with no character (e.g. `logo`)
+  score identity?" — against the frames the operator approved. No character
+  needed, no special case.
+- **D44 (2026-09-14, T10a) `claypipe canary restyle` — the stage the gate was
+  always meant to sit in front of.** D17 puts the canary gate at the `batch`
+  command boundary, but a verdict needs frames to look at, and the only way to
+  get them was to run the full batch FIRST — paying for every frame of a look
+  nobody had approved. `canary restyle` restyles ONLY the three canary frames,
+  through the ledger. On fal Kontext pro that is $0.12 instead of $28.80.
+  Deliberately UNSCORED: no identity references exist yet, by definition (D43),
+  and a score with no reference is a number with a hole in it. It uses the shot
+  plan's seed so the operator approves a look the batch actually reproduces, and
+  the batch RESUMES those 3 frames rather than regenerating them (asserted:
+  resumed=3, restyled=57, total=60 — no double spend).
+- **D45 (2026-09-14, T11) SHOT DETECTION IS THE KEYSTONE, AND
+  PySceneDetect-ABSENT IS A REFUSAL, NOT A FALLBACK.** `claypipe/pipeline/
+  shots.py`. Three problems collapse into it:
+  1. **Seeding.** "Per-shot fixed seed" was specified and has been per-CLIP
+     since step 1. `seed = 1000 + shot_index`.
+  2. **D15/D34 CLOSED STRUCTURALLY.** A hard cut looks EXACTLY like
+     catastrophic temporal failure to a flow-warped residual, because the
+     previous frame is a different scene and the warp measures nothing.
+     `restyle_frames(boundary_frames=...)` now hands the scorer
+     `previous_restyled=None` at a shot opener, so the frame is scored as the
+     first frame it effectively is — reusing existing semantics rather than
+     special-casing the metric. `scores.jsonl` records `shot_boundary` per
+     frame so a reviewer can see WHY a TF is the first-frame value.
+  3. **D30 CLOSED.** The canary's third slot was the LAST frame as a stated
+     stand-in. It is now the MIDPOINT of the busiest shot — midpoint, not
+     opener, because a cut's first frame is often the calm instant before the
+     action it was cut to. Motion is ranked over the SOURCE frames: the
+     operator is choosing which moment to inspect, and that must not depend on
+     what the backend already did to it.
+  Detection runs on the source at ITS OWN frame rate then maps to extracted
+  numbering. Those are different clocks — a 24fps source extracted at 12fps has
+  half the frames — and conflating them puts every boundary in the wrong place
+  silently. `_assert_covers` proves every extracted frame belongs to exactly one
+  shot; the alternative failure is a raise hundreds of frames into a paid batch.
+  A missing PySceneDetect raises with the install line. It must NEVER fall back
+  to one whole-clip shot: that silently restores per-clip seeding and the false
+  TF flags, which is the bug. `--single-shot` is the explicit escape hatch and
+  logs a warning naming what it disables.
+  **DETECTOR CALIBRATION (measured):** clip A -> 41 cuts, reproducing the
+  independent coarse mean-delta measurement EXACTLY; 28.9 shots/60s, and this is
+  the clip the keyframe budget is set against. Clip B -> **21 cuts, against 14
+  from the coarse pass.** The two detectors genuinely disagree; clip B is dark
+  high-contrast action where a luma threshold under-counts cuts between
+  similar-looking shots. Recorded as 21 WITH the disagreement stated, not
+  averaged away.
+- **D46 (2026-09-14, T12) CAPTIONS ARE A LAYOUT ELEMENT IN THE GAP BAND. THE
+  `subtitles=` FILTER IS GONE.** The reference clips put captions in the band
+  BETWEEN the panels, never over the picture (MASTER_PLAN §1.4).
+  libass draws over the composited frame and has no idea the gap exists, so a
+  long cue at a fixed size spills onto a panel and crops a face — in a file that
+  plays perfectly. The gap is 72px of 1920; fitting text to it is a measured
+  constraint and Pillow can measure. A subtitle filter cannot be asked "did that
+  fit". This also means ONE text renderer for the whole canvas, alongside D1's
+  header.
+  The band is now its own TRACK: a PNG sequence, one gap-band-sized RGBA image
+  per output frame, composited as a single FINITE input at the gap's y offset.
+  NOT one overlay per cue — dozens of still inputs and `enable=between(...)`
+  filters would flirt with the unbounded-input trap D5 records. Blank frames are
+  REAL IMAGES: a PNG sequence with a missing index stops the input early, which
+  truncates the overlay and, via D6's trim bound, the video.
+  Verified: audio MD5 `a8dc9027aae8ddf557b0f1a09a4c7336` identical on the
+  extracted `audio.aac`, on the output without captions, and with them. Caption
+  ink on a real render spans y=942..979 inside the 924..995 band.
+  **Non-dialogue cues are PRESERVED and rendered but never INVENTED.** Whisper
+  transcribes speech; labelling `*smack*` needs an audio event classifier this
+  pipeline does not have. `cues.json` is therefore hand-editable and `claypipe
+  captions` refuses to clobber it without `--overwrite`. `sentence_case` leaves
+  `[dramatic music]` exactly as written — a full stop would corrupt a
+  closed-caption convention.
+- **D47 (2026-09-14) TWO BUGS FOUND BY PROVING THE FLOWS END TO END, not by
+  reading code.** Recorded because both produced output that looked fine:
+  1. **Canary slot collision.** On a single-shot clip the most-motion frame IS
+     the middle frame, so the selection silently returned TWO frames for a
+     three-frame canary — the operator would approve less than they were quoted
+     for. Collisions now fall through to the next distinct candidate in the same
+     busiest shot, with an assert that three distinct frames come back.
+  2. **A 3-frame canary page captioned its third slot "no shot plan for this
+     run"** when the plan had already been applied by `canary restyle`.
+- **D48 (2026-09-14) THE SYNTHETIC FIXTURES CANNOT DEMONSTRATE F1 — and that
+  contrast IS finding F4.** On the bundled `testsrc` clip the dummy posterise
+  barely moves a CLIP embedding, so the canary-vs-source ID gap collapses to
+  **0.001** and the fixture "proves" F1 is a non-issue. On real footage the same
+  measurement gives **0.25-0.35**. The F1 measurement test therefore SKIPS
+  unless `CLAYPIPE_REFERENCE_CLIP_A` points at real footage, with the reason in
+  its docstring. Generalisation: thresholds and premises calibrated on
+  deterministic synthetic fixtures do not transfer to generative output on real
+  frames. T16 is the first real datum; do not treat fixture numbers as
+  calibration.
+
 ## Pending / Next
+- **PHASE 2 (MASTER_PLAN §8), newest first. T13/T14/T15/T18 are unblocked local
+  code; start there.**
+  - T13 mode split: `ClipRestyleBackend` protocol alongside `RestyleBackend`;
+    a `modes:` block in weights.yaml (surface vs resynth target vectors);
+    per-mode retry caps and budgets; `runs.mode` persisted. UNBLOCKED.
+  - T14 clip canary: `canary --clip <seconds>` renders a 3-second trim. Same
+    gate, same verdict file, no override flag. UNBLOCKED.
+  - T15 ledger price model: `{backend: {unit: image|megapixel|video_second,
+    rate, round_up_to_mp}}`. fal bills per MP ROUNDED UP to the next whole
+    megapixel, so 640x640 (0.41MP) pays the 1MP rate. UNBLOCKED.
+  - T18 adaptive keyframe propagation: reuse the TF optical flow; restyle
+    shot-first frames, warp forward, new keyframe when residual exceeds
+    threshold. Budget against clip A's 28.9 shots/60s. UNBLOCKED.
+  - T16 the bake-off (~$0.95 total). BLOCKED on the operator confirming B1 and
+    authorising spend. This is the FIRST REAL DATUM for both mode target
+    vectors — see D48.
+  - T17 duration invariant: replace frame-count equality with
+    duration-within-one-frame plus the UNCHANGED audio MD5 gate. Decimate 16fps
+    -> 12fps on the restyled panel (decimation, NOT interpolation — it would
+    smooth out the stop-motion stepping D40 says is clay's signature).
+    Code is local; needs a Track C output to verify against.
+  - T19 production backend (Modal + SD1.5 + ControlNet + clay LoRA). BLOCKED on
+    a Modal account. A CLAY LoRA is the highest-leverage item on the cost table.
+- **BLOCKERS, operator-owned (MASTER_PLAN §0):**
+  - **B1** — confirm `FAL_KEY` was ROTATED, not reused. D36 records a key pasted
+    into a session transcript. A new key is installed at `.env` this session,
+    but only the operator knows whether it is new.
+  - **B2** — REVOKE the GCP service-account key at
+    `socialpilot-ui/config/googleAuth.json`, tracked in a PUBLIC repo (commit
+    `59c9a14`) with Editor access to the sheet. Revoke FIRST; removing the file
+    is not a fix. Blocks T24.
+  - **B3** — decide which account owns the Railway service. The CLI is
+    authenticated as `shoppykid1@gmail.com`, not `kyeboah@kymediamgmt.com`.
+    Blocks T21/T22.
 - **Dashboard workstream (D32), in dependency order:**
   1. `claypipe export` snapshot contract — DONE.
   2. Railway: API service + persistent store that accepts snapshots and serves
@@ -458,6 +682,30 @@
 - RUNBOOK.md / CONFIG.md (Rule 33) not written yet — due with step 6.
 
 ## Log (append-only, newest first)
+
+### 2026-09-14 — MASTER_PLAN landed; Phase 1 (T9-T12) complete
+- `MASTER_PLAN.md` written as the single build plan, superseding the three
+  working-note briefs. Claymation target recorded (D40). All §1 measurements
+  re-verified independently; three corrections found (D41). Commit `b1f7b39`.
+- **T9** layout engine — panel height derived from source aspect, fixed
+  geometry retired (D42). Commit `e50bc64`.
+- **T11** shots.py — per-shot seeds, boundary-aware temporal scoring, D30 and
+  D15/D34 closed (D45). Commit `a1698c5`. Taken before T10 because shot
+  detection is what gives the canary its real most-motion frame, which T10 then
+  locks as a reference.
+- **T10** identity references from the approved canary (D43), plus T10a
+  `canary restyle` (D44). Commit `10b3965`.
+- **T12** captions as a layout element in the gap band (D46). Commit `d5270bf`.
+- Two bugs found by running the flows, not by reading code (D47). The synthetic
+  fixtures' inability to demonstrate F1 recorded as D48.
+- VERIFIED, not assumed: geometry checked on rendered PIXELS (background-colour
+  band boundaries, both aspects, summing to 1920); audio MD5 identical across
+  extracted/uncaptioned/captioned; detector cut counts against the real clips;
+  ID measured both ways on real footage; no-double-spend asserted across the
+  canary and batch stages.
+- pytest 299 passed / 3 skipped / 0 failed, up from 190 at day start.
+- NOT done, and not started: Phase 2 (T13-T19), Phase 3 (T20-T22), Phase 4
+  (T23-T24). Blockers B1/B2/B3 are operator-owned and untouched.
 
 ### 2026-09-12 — T4-T8: paid-backend locks, stubbed FalBackend, docs
 - T4: two independent locks in front of any paid endpoint (--live for intent,
