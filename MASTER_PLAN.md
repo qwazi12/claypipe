@@ -285,10 +285,26 @@ in SPEC §3 will otherwise revert it.
 
 **A3 — The canary gate needs a clip mode.** Three still frames cannot canary a
 video model; temporal behaviour is the only reason to use one. Add
-`canary --clip <seconds>` that renders a 3-second trim instead of three frames.
+`canary --clip <seconds>` that renders a short trim instead of three frames.
 Same gate, same verdict file, same approve/reject/adjust, same "no override
-flag" rule (D17). At Track C prices a 3-second canary is $0.12-0.54 — same order
-as a three-frame canary, so the firewall economics don't change.
+flag" rule (D17).
+
+**[CORRECTED] A 3-second VACE canary is not purchasable, and costs $0.20 not
+$0.12.** VACE's minimum chunk is 81 frames at 16fps native = 5.06 video-seconds
+= $0.20 at $0.04/video-second. A 3-second canary at the pipeline's 12fps is 36
+frames, which VACE cannot honour at all — it would bill its minimum, or pad the
+range, and padding changes the frame count and breaks the duration invariant.
+So the clip-canary floor is **5.06s / $0.20**, and asking for less buys a
+smaller canary at the same price. The firewall economics still don't change
+(a three-frame Kontext-pro canary is $0.12, the same order), but the number and
+the minimum duration were both wrong. T14 warns with this arithmetic rather
+than letting it surface on an invoice.
+
+The trim is anchored on the MOST-MOTION shot, not the head of the clip: a video
+model's failure mode is temporal — flicker, smearing, identity wandering — and
+the opening seconds are often a static establishing shot where none of it
+shows. Canarying the calm part of a clip is how a temporal model passes a gate
+it should fail.
 
 **A4 — Two protocols, one seam.** Keep `RestyleBackend` (per-frame) and add
 `ClipRestyleBackend` (per-range) alongside it. Don't generalise one into the
@@ -681,9 +697,9 @@ One commit per task with its own acceptance test, matching the T1-T8 convention.
 
 | # | Task | Acceptance |
 |---|---|---|
-| **T13** | **Mode split (A1/A4).** `ClipRestyleBackend` protocol alongside `RestyleBackend`; `modes:` block in `weights.yaml`; per-mode retry caps and budgets; `runs.mode` persisted. | A Track C chunk failure consumes budget at its own rate, not the per-frame rate. Mode visible in `status` and the QC card. |
-| **T14** | **Clip canary (A3).** `canary --clip <seconds>` renders a 3-second trim. Same gate, same verdict file, no override flag. | Track C run refuses to batch without a clip-canary verdict. |
-| **T15** | **Ledger price model.** `weights.yaml` gains `{backend: {unit: image\|megapixel\|video_second, rate, round_up_to_mp}}`. | Ledger authorises correctly against per-MP and per-video-second backends. Unpriced backend still refused. |
+| **T13** | **Mode split (A1/A4).** `ClipRestyleBackend` protocol alongside `RestyleBackend`; `modes:` block in `weights.yaml`; per-mode retry caps and budgets; `runs.mode` persisted. | **DONE.** resynth relaxes ssim/lpips/id and TIGHTENS tf_min; retry cap 1 vs 2 and budget 5% vs 15%. `calibrated: false` makes a paid resynth run a refusal (F4). Mode in `status` and the QC card. |
+| **T14** | **Clip canary (A3).** `canary restyle --clip <seconds>` renders a trim, anchored on the most-motion shot. Same gate, same verdict file, no override flag. | **DONE.** A resynth run refuses a 3-frame canary at render AND at batch; the kind lives on the manifest so it cannot be forged through the submission URL. Warns below the backend's min chunk with the real arithmetic. |
+| **T15** | **Ledger price model.** `weights.yaml` gains `{backend: {unit: image\|megapixel\|video_second, rate, round_up_to_mp}}`. | **DONE.** 60s VACE 480p prices at exactly $2.40; the MP round-up trap is modelled (0.41MP bills as 1MP). `per_call()` REFUSES a non-per-image backend rather than answering. Unpriced backend still refused. Ledger records the unit and billed dimension. |
 | **T16** | **The bake-off, ~$0.95 total.** Track A 3-frame canary: Kontext pro ($0.12), SiliconFlow Kontext dev ($0.05), SDXL+CN ($0.02), SD1.5+CN+clay LoRA ($0.01), Qwen Edit ($0.09). Track C 3-second canary: Wan VACE 480p ($0.12), Aleph ($0.54). Print full component vectors. | A real clay-restyled frame and clip exist. Ledger reconciles to the cent. **Both mode target vectors set from measurement and recorded as decisions** (closes F4). |
 | **T17** | **Duration invariant (A2).** Replace frame-count equality with duration-within-one-frame plus the unchanged audio MD5 gate. Decimate 16 fps -> 12 fps on the restyled panel. | A VACE output passes the audio hash. Restyled panel measures 12 fps effective on the §1.2 test. Decision recorded against SPEC §3. |
 | **T18** | **Adaptive keyframe propagation (Track A).** Reuse the TF optical flow: restyle shot-first frames, warp forward, new keyframe when residual exceeds threshold. | A clip with §1.3 shot structure spends <= 60 paid frames. Propagated frames score TF >= 0.99. |

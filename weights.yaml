@@ -150,6 +150,14 @@ firewalls:
       dummy:
         unit: image
         rate: 0.0
+      # The offline Track C stand-in. Priced as a per-video-second backend at
+      # zero, so the whole clip path — including the unit-aware ledger — is
+      # exercised at no cost. Listing it is not a formality: an unpriced
+      # backend is refused outright, so an unlisted dummy_clip would make the
+      # entire Track C path untestable.
+      dummy_clip:
+        unit: video_second
+        rate: 0.0
       # Flux Kontext [pro] via fal — the current default, and the most
       # expensive realistic option at $28.80 per 60s clip at 12fps.
       fal:

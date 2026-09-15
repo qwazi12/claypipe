@@ -21,7 +21,13 @@ from .pipeline import qccard
 from .pipeline.extract import count_frames, extract_audio, extract_frames, frame_paths
 from .pipeline import captions, shots
 from .pipeline.layout import LayoutError, source_aspect_of
-from .pipeline.restyle import get_backend, restyle_frames
+from .pipeline.restyle import (
+    ChunkLengthError,
+    get_backend,
+    get_clip_backend,
+    restyle_clip_range,
+    restyle_frames,
+)
 from .pipeline.retry import RetryController
 from .pipeline.score import Scorer, ScoringError, load_image
 from .pipeline.retry import RunHalted, SpendLedger
@@ -150,6 +156,36 @@ def intake(
         **layout.as_dict(),
     )
     typer.echo(run.paths.root)
+
+
+def _require_canary_kind_matches_mode(run: Run) -> None:
+    """T14/A3: a Track C run needs a CLIP canary, not three stills.
+
+    Three still frames cannot canary a video model. Temporal behaviour is the
+    only reason to reach for one, and a still shows none of it — so an approved
+    frame canary on a resynth run is an approval of something nobody looked at.
+
+    Checked against the MANIFEST, which `canary restyle` wrote, rather than
+    against the verdict: the verdict arrives as a query string the operator
+    pastes, and a gate that can be satisfied by editing a URL is not a gate
+    (D17's whole point).
+    """
+    if run.manifest.mode != "resynth":
+        return
+    kind = run.manifest.canary_kind
+    if kind == "clip":
+        return
+    run.logger.error(
+        "batch.blocked", breach="canary_kind_mismatch",
+        mode=run.manifest.mode, canary_kind=kind,
+    )
+    _fail(
+        f"this run is mode {run.manifest.mode!r}, which needs a CLIP canary, "
+        f"but its canary is {kind or 'absent'!r}.\n"
+        "Three still frames cannot canary a video model — temporal behaviour "
+        "is the only reason to use one, and a still shows none of it. Run "
+        "`claypipe canary restyle --clip <seconds>` and approve that instead."
+    )
 
 
 def _require_canary(run: Run, weights, *, wait: bool) -> dict:
@@ -497,6 +533,9 @@ def batch(
     # backend is even constructed, and long before the ledger authorises a call.
     verdict = _require_canary(run, weights, wait=wait_for_canary)
 
+    # FIREWALL 1b (T14/A3): the canary must be the right KIND for the mode.
+    _require_canary_kind_matches_mode(run)
+
     profile = styles.profile(run.manifest.style)
     prompt = _effective_prompt(run, profile)
     try:
@@ -720,6 +759,127 @@ CANARY_CAPTION_STANDIN = "last frame (stand-in: no shot plan for this run)"
 CANARY_CAPTION_PRESELECTED = "third slot, selected by `canary restyle`"
 
 
+def _canary_restyle_clip(
+    run: Run, weights, sources: list[Path], plan, seconds: float,
+    prompt: str, profile, ledger, *, base: Path, live: bool,
+) -> None:
+    """Restyle a contiguous trim through a ClipRestyleBackend (T14/A3).
+
+    The trim is taken from the MOST-MOTION shot, not from the head of the clip.
+    A video model's failure mode is temporal — flicker, smearing, identity
+    wandering between frames — and the opening seconds of a clip are often a
+    static establishing shot where none of that shows. Canarying the calm part
+    of a clip is how a temporal model passes a gate it should fail.
+    """
+    fps = run.manifest.fps
+    want = max(1, int(round(seconds * fps)))
+    if want > len(sources):
+        _fail(
+            f"--clip {seconds}s is {want} frames at {fps}fps, but the run only "
+            f"has {len(sources)} extracted frames ({len(sources) / fps:.2f}s). "
+            "Ask for less."
+        )
+
+    start = 1
+    anchor = "clip head (no shot plan)"
+    if plan is not None and plan.shots:
+        try:
+            busiest = plan.most_motion_shot()
+            # Centre the trim on the busiest shot, clamped into the clip.
+            centre = busiest.start_frame + busiest.frame_count // 2
+            start = max(1, min(centre - want // 2, len(sources) - want + 1))
+            anchor = (
+                f"most-motion shot {busiest.index} of {len(plan.shots)} "
+                f"(motion {busiest.motion:.2f})"
+            )
+        except shots.ShotDetectionError:
+            pass
+
+    chunk = sources[start - 1 : start - 1 + want]
+    try:
+        clip_backend = get_clip_backend(run.manifest.backend, live=live)
+    except ValueError as exc:
+        _fail(str(exc))
+
+    # A clip backend has a MINIMUM CHUNK, and asking below it does not make the
+    # call cheaper — the backend bills its minimum, or pads the range, which
+    # would change the frame count and break the duration invariant.
+    #
+    # This bites the plan's own numbers. MASTER_PLAN §A3 prices a 3-second Wan
+    # VACE canary at $0.12, but VACE's floor is 81 frames at 16fps native =
+    # 5.06 video-seconds = $0.20. A 3-second canary at the pipeline's 12fps is
+    # 36 frames, which VACE cannot honour at all. Stated here rather than
+    # discovered on the invoice.
+    if len(chunk) < clip_backend.min_chunk_frames:
+        floor_seconds = clip_backend.min_chunk_frames / clip_backend.native_fps
+        billed = weights.firewalls.cost.price_for(
+            clip_backend.name, video_seconds=floor_seconds
+        )
+        asked = weights.firewalls.cost.price_for(
+            clip_backend.name, video_seconds=len(chunk) / fps
+        )
+        run.logger.warn(
+            "canary.restyle.below_min_chunk",
+            asked_frames=len(chunk),
+            asked_seconds=round(len(chunk) / fps, 3),
+            min_chunk_frames=clip_backend.min_chunk_frames,
+            native_fps=clip_backend.native_fps,
+            floor_seconds=round(floor_seconds, 3),
+            asked_usd=round(asked, 4),
+            billed_usd_floor=round(billed, 4),
+            consequence=(
+                "the backend cannot honour a chunk this short. It will bill its "
+                "minimum, or pad the range — and padding changes the frame count, "
+                "which breaks the duration invariant. Asking below the floor "
+                "buys a smaller canary at the same price."
+            ),
+        )
+        typer.secho(
+            f"WARNING: --clip {seconds}s is {len(chunk)} frames, below "
+            f"{clip_backend.name}'s {clip_backend.min_chunk_frames}-frame "
+            f"minimum ({floor_seconds:.2f}s at its native {clip_backend.native_fps}fps). "
+            f"A real backend bills the minimum (${billed:.4f}), not what you "
+            f"asked for (${asked:.4f}) — so ask for at least "
+            f"{floor_seconds:.2f}s and see more of the clip for the same money.",
+            fg=typer.colors.YELLOW, err=True,
+        )
+
+    seed = plan.seed_for_frame(start) if plan is not None else 1000
+    try:
+        written = restyle_clip_range(
+            backend=clip_backend, src_frames=chunk,
+            out_dir=run.paths.restyled_frames, prompt=prompt,
+            strength=profile.strength, seed=seed, logger=run.logger,
+            ledger=ledger, fps=fps,
+        )
+    except ChunkLengthError as exc:
+        run.logger.error("canary.restyle.chunk_length", error=str(exc))
+        _fail(str(exc))
+
+    run.manifest.canary_kind = "clip"
+    run.manifest.canary_clip_seconds = len(written) / fps
+    run.save()
+    run.logger.info(
+        "canary.restyle",
+        backend=clip_backend.name, kind="clip",
+        frames=len(written), seconds=round(len(written) / fps, 3),
+        first_frame=chunk[0].name, last_frame=chunk[-1].name,
+        anchor=anchor, seed=seed,
+        native_fps=clip_backend.native_fps, pipeline_fps=fps,
+        scored=False,
+        reason="no identity references exist yet — T10 makes the approved "
+               "output of this stage into them",
+        est_cost_usd=round(
+            clip_backend.cost_per_video_second_usd() * len(written) / fps, 4
+        ),
+    )
+    typer.echo(
+        f"{len(written)} frames ({len(written) / fps:.2f}s) restyled as a CLIP "
+        f"canary from the {anchor} with backend {clip_backend.name!r} — now run "
+        "`claypipe canary render`"
+    )
+
+
 @canary_app.command("restyle")
 def canary_restyle(
     run_dir: Path = typer.Argument(..., help="Run directory or run id"),
@@ -735,8 +895,16 @@ def canary_restyle(
     max_cost_usd: Optional[float] = typer.Option(
         None, "--max-cost-usd", help="Hard cap on this stage's spend."
     ),
+    clip: Optional[float] = typer.Option(
+        None, "--clip",
+        help="Render a CLIP canary of this many seconds instead of three "
+             "stills. REQUIRED for --mode resynth: three frames cannot canary "
+             "a video model. At Track C prices a 3-second canary is $0.12-0.54 "
+             "— the same order as a three-frame canary, so the firewall "
+             "economics are unchanged.",
+    ),
 ) -> None:
-    """STAGE 1 — restyle ONLY the canary frames, for review.
+    """STAGE 1 — restyle ONLY the canary frames (or a short clip), for review.
 
     This is the stage the canary gate was always meant to sit behind. `batch`
     refuses to start without an approved verdict (D17), and the verdict needs
@@ -799,14 +967,33 @@ def canary_restyle(
         )
 
     sources = frame_paths(run.paths.source_frames)
-    chosen, third_caption = _canary_frame_names(sources, plan)
-    if not chosen:
+    if not sources:
         _fail(f"no source frames in {run.paths.source_frames}")
 
     ledger = SpendLedger(
         paths=run.paths, project_dir=Path(base), cfg=weights.firewalls,
         run_id=run.run_id, logger=run.logger, max_cost_usd_run=max_cost_usd,
     )
+
+    # ---- T14/A3: the CLIP canary ----------------------------------------
+    if clip is not None:
+        if clip <= 0:
+            _fail(f"--clip needs a positive duration, got {clip}")
+        _canary_restyle_clip(
+            run, weights, sources, plan, clip, prompt, profile, ledger,
+            base=Path(base), live=live,
+        )
+        return
+
+    if run.manifest.mode == "resynth":
+        _fail(
+            "this run is mode 'resynth', so a three-frame canary would approve "
+            "something nobody looked at — temporal behaviour is the only reason "
+            "to use a video model, and a still shows none of it. Use "
+            "`canary restyle --clip <seconds>`."
+        )
+
+    chosen, third_caption = _canary_frame_names(sources, plan)
     run.paths.restyled_frames.mkdir(parents=True, exist_ok=True)
     seed_for = plan.seed_for_frame if plan is not None else (lambda _i: 1000)
     index_of = {p.name: i for i, p in enumerate(sources, start=1)}
@@ -825,9 +1012,13 @@ def canary_restyle(
         run.logger.info("canary.restyle.frame", frame=src.name, seed=seed)
         written.append(dst)
 
+    run.manifest.canary_kind = "frames"
+    run.manifest.canary_clip_seconds = None
+    run.save()
     run.logger.info(
         "canary.restyle",
-        backend=backend.name, frames=len(written), third_slot=third_caption,
+        backend=backend.name, kind="frames",
+        frames=len(written), third_slot=third_caption,
         scored=False,
         reason="no identity references exist yet — T10 makes the approved "
                "output of this stage into them",

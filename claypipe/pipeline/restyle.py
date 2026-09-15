@@ -116,12 +116,186 @@ class DummyBackend:
         styled.save(dst)
 
 
+class DummyClipBackend:
+    """Offline, free, deterministic ClipRestyleBackend. Zero API spend.
+
+    Same role DummyBackend plays for Track A: it makes the ENTIRE Track C path
+    runnable and testable with no credential and no money, including the parts
+    that only a clip backend has — chunking, the native-fps mismatch, and a
+    chunk coming back the wrong length.
+
+    It deliberately imitates VACE's awkward properties rather than being
+    convenient: it works at 16fps natively against the pipeline's 12, and it
+    accepts 81-240 frames per chunk. Those are the two facts that force the
+    duration invariant (A2/T17), so a stand-in that ignored them would let the
+    pipeline pass tests it should fail.
+    """
+
+    name = "dummy_clip"
+    min_chunk_frames = 81
+    max_chunk_frames = 240
+    native_fps = 16
+
+    def cost_per_video_second_usd(self) -> float:
+        return 0.0
+
+    def restyle_clip(
+        self,
+        src_frames: list[Path],
+        out_dir: Path,
+        *,
+        prompt: str,
+        strength: float,
+        seed: int,
+    ) -> list[Path]:
+        out_dir.mkdir(parents=True, exist_ok=True)
+        written: list[Path] = []
+        for offset, src in enumerate(src_frames):
+            dst = out_dir / src.name
+            with Image.open(src) as img:
+                frame = img.convert("RGB")
+            # A resynthesis stand-in must MOVE GEOMETRY, or it would exercise
+            # the surface-mode gate instead of the resynth one. A small
+            # per-frame shift plus a posterise does that deterministically.
+            shift = (seed + offset) % 5 - 2
+            moved = frame.transform(
+                frame.size, Image.AFFINE, (1, 0, shift, 0, 1, shift),
+                resample=Image.BILINEAR,
+            )
+            levels = max(2, 8 - int(round(strength * 5)))
+            styled = moved.filter(ImageFilter.SMOOTH_MORE)
+            styled = Image.eval(
+                styled, lambda v, n=levels: int(v / (256 / n)) * (255 // (n - 1))
+            )
+            styled.save(dst)
+            written.append(dst)
+        return written
+
+
 def get_backend(name: str, *, live: bool = False) -> RestyleBackend:
     if name == "dummy":
         return DummyBackend()
     if name == "fal":
         return FalBackend(live=live)
     raise ValueError(f"unknown backend {name!r} (available: dummy, fal)")
+
+
+def get_clip_backend(name: str, *, live: bool = False) -> ClipRestyleBackend:
+    """Track C backends. Separate resolver, because the protocols are separate
+    (A4) and a caller that wants a clip backend must not silently receive a
+    per-frame one."""
+    if name in ("dummy", "dummy_clip"):
+        return DummyClipBackend()
+    raise ValueError(
+        f"unknown clip backend {name!r} (available: dummy_clip). Wan VACE and "
+        "Runway Aleph land with T16/T19 — no Track C endpoint is wired yet."
+    )
+
+
+class ChunkLengthError(RuntimeError):
+    """A clip backend returned a different number of frames than it was given.
+
+    This failure has NO per-frame analogue, which is the reason
+    ClipRestyleBackend is a separate protocol. A short chunk would shorten the
+    clip, break the duration invariant, and desync the audio — in a file that
+    plays.
+    """
+
+
+def restyle_clip_range(
+    *,
+    backend: ClipRestyleBackend,
+    src_frames: list[Path],
+    out_dir: Path,
+    prompt: str,
+    strength: float,
+    seed: int,
+    logger: RunLogger,
+    ledger: "object | None" = None,
+    fps: int,
+) -> list[Path]:
+    """Restyle a contiguous frame range in chunks the backend can honour.
+
+    The returned length is CHECKED against the input length, per chunk. A
+    backend that returns 80 frames for 81 would otherwise shorten the clip and
+    desync the audio, and the resulting file would play perfectly.
+
+    Chunks are authorised against the ledger in VIDEO-SECONDS (T15), because
+    that is what a Track C backend actually bills.
+    """
+    if not src_frames:
+        raise FileNotFoundError("restyle_clip_range got no frames")
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    written: list[Path] = []
+    total = len(src_frames)
+    start = 0
+    chunk_index = 0
+
+    while start < total:
+        remaining = total - start
+        size = min(backend.max_chunk_frames, remaining)
+        # Never emit a chunk below the backend's floor unless it is the whole
+        # remainder — a backend asked for fewer frames than it supports may
+        # pad, which would change the frame count.
+        if size < backend.min_chunk_frames and remaining == size and written:
+            # Fold the short tail into the previous chunk's re-run instead of
+            # sending an undersized request.
+            start = max(0, start - (backend.min_chunk_frames - size))
+            size = min(backend.max_chunk_frames, total - start)
+        chunk = src_frames[start : start + size]
+
+        already = [out_dir / f.name for f in chunk]
+        if all(p.is_file() for p in already):
+            logger.info(
+                "restyle.clip.skip", chunk=chunk_index, frames=len(chunk),
+                reason="already restyled",
+            )
+            written.extend(already)
+            start += size
+            chunk_index += 1
+            continue
+
+        video_seconds = len(chunk) / fps
+        entry_id = None
+        if ledger is not None:
+            entry_id = ledger.authorize(
+                frame=f"clip_{chunk[0].stem}-{chunk[-1].stem}",
+                backend=backend.name, stage="batch", video_seconds=video_seconds,
+            )
+        produced = backend.restyle_clip(
+            chunk, out_dir, prompt=prompt, strength=strength, seed=seed + chunk_index
+        )
+        if ledger is not None and entry_id is not None:
+            ledger.reconcile(
+                entry_id, backend.cost_per_video_second_usd() * video_seconds
+            )
+
+        if len(produced) != len(chunk):
+            raise ChunkLengthError(
+                f"clip backend {backend.name!r} was given {len(chunk)} frames "
+                f"(chunk {chunk_index}: {chunk[0].name}..{chunk[-1].name}) and "
+                f"returned {len(produced)}. A chunk of the wrong length "
+                "shortens the clip and desyncs the audio, in a file that plays. "
+                "Refusing to continue."
+            )
+        logger.info(
+            "restyle.clip.chunk", chunk=chunk_index, frames=len(chunk),
+            video_seconds=round(video_seconds, 4), seed=seed + chunk_index,
+            native_fps=backend.native_fps, pipeline_fps=fps,
+        )
+        written.extend(produced)
+        start += size
+        chunk_index += 1
+
+    logger.info(
+        "restyle.clip",
+        backend=backend.name, frames=len(written), chunks=chunk_index,
+        est_cost_usd=round(
+            backend.cost_per_video_second_usd() * len(written) / fps, 4
+        ),
+    )
+    return written
 
 
 def restyle_frames(

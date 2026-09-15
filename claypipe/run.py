@@ -65,6 +65,25 @@ class RunManifest(BaseModel):
     # run identity, fixed at intake — changing it mid-run would score the first
     # half of a clip against a different gate than the second.
     mode: str = "surface"
+    # T14/A3: WHICH KIND of canary this run's verdict covers.
+    #   "frames" — three stills. Sufficient for Track A.
+    #   "clip"   — a short trim. REQUIRED for Track C, because three stills
+    #              cannot canary a video model: temporal behaviour is the only
+    #              reason to use one, and a still shows none of it.
+    # On the MANIFEST rather than only in the verdict, because the verdict
+    # arrives as a query string the operator pastes, and a gate that can be
+    # satisfied by editing a URL is not a gate (D17).
+    canary_kind: str | None = None
+    canary_clip_seconds: float | None = None
+    # T14/A3: WHICH KIND of canary this run's verdict covers.
+    #   "frames" — three stills. Sufficient for Track A.
+    #   "clip"   — a short trim. REQUIRED for Track C, because three stills
+    #              cannot canary a video model: temporal behaviour is the only
+    #              reason to use one, and a still shows none of it.
+    # Set by `canary restyle`, read by the gate. On the MANIFEST rather than
+    # only in the verdict, so it cannot be forged through the submission URL.
+    canary_kind: str | None = None
+    canary_clip_seconds: float | None = None
     reference_images: list[str] = Field(default_factory=list)
     # T10/F1: WHERE the identity references came from, which decides whether
     # the ID metric is measuring anything useful.
