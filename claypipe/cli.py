@@ -19,7 +19,7 @@ from .config import ConfigError, load_all
 from .pipeline import assemble as assemble_stage
 from .pipeline import qccard
 from .pipeline.extract import count_frames, extract_audio, extract_frames, frame_paths
-from .pipeline import captions, shots
+from .pipeline import captions, propagate, shots
 from .pipeline.layout import LayoutError, source_aspect_of
 from .pipeline.restyle import (
     ChunkLengthError,
@@ -276,6 +276,70 @@ def _effective_prompt(run: Run, profile) -> str:
     return override
 
 
+def _run_with_propagation(
+    run: Run, weights, backend, profile, prompt: str, shot_plan, ledger,
+    *, residual_max: float | None, max_chain: int | None,
+) -> int:
+    """T18: plan the keyframes, show the cost, then spend only on those.
+
+    Planning happens BEFORE the ledger authorises anything, so the operator
+    sees the paid-frame count and the projected cost before a single call goes
+    out. A propagation scheme that only reveals its cost by spending it is not
+    a cost reduction.
+    """
+    sources = frame_paths(run.paths.source_frames)
+    keyframe_plan = propagate.plan_keyframes(
+        source_frames=sources,
+        shot_plan=shot_plan,
+        cfg=weights.temporal,
+        residual_max=(
+            residual_max if residual_max is not None else propagate.DEFAULT_RESIDUAL_MAX
+        ),
+        max_chain=max_chain if max_chain is not None else propagate.DEFAULT_MAX_CHAIN,
+        logger=run.logger,
+    )
+    keyframe_plan.write(run.paths.keyframe_plan)
+
+    summary = keyframe_plan.summary()
+    try:
+        unit_price = weights.firewalls.cost.per_call(backend.name)
+    except ConfigError as exc:
+        _fail(str(exc))
+    projected = keyframe_plan.paid_frames * unit_price
+    without = keyframe_plan.total_frames * unit_price
+    run.logger.info(
+        "propagate.projection",
+        paid_frames=keyframe_plan.paid_frames,
+        total_frames=keyframe_plan.total_frames,
+        reduction_factor=summary["reduction_factor"],
+        projected_usd=round(projected, 4),
+        without_propagation_usd=round(without, 4),
+        saved_usd=round(without - projected, 4),
+    )
+    typer.echo(
+        f"propagation: {keyframe_plan.paid_frames} paid of "
+        f"{keyframe_plan.total_frames} frames ({summary['reduction_factor']}x) "
+        f"— ${projected:.4f} instead of ${without:.4f}"
+    )
+
+    def restyle_keyframe(index: int, src: Path, dst: Path) -> None:
+        entry_id = ledger.authorize(
+            frame=src.name, backend=backend.name, stage="batch"
+        )
+        backend.restyle(
+            src, dst, prompt=prompt, strength=profile.strength,
+            seed=shot_plan.seed_for_frame(index),
+        )
+        ledger.reconcile(entry_id, backend.cost_per_frame_usd())
+
+    result = propagate.execute_plan(
+        plan=keyframe_plan, source_frames=sources,
+        out_dir=run.paths.restyled_frames, cfg=weights.temporal,
+        restyle_keyframe=restyle_keyframe, logger=run.logger,
+    )
+    return result["total_frames"]
+
+
 def _build_shot_plan(run: Run, extracted: int):
     """The run's shot plan (T11): detected once, then reused.
 
@@ -487,6 +551,23 @@ def batch(
              "immediately when it is absent. Useful when the operator is "
              "reviewing the page in another window.",
     ),
+    propagate_keyframes: bool = typer.Option(
+        False, "--propagate",
+        help="T18: restyle one frame per shot and WARP the rest forward along "
+             "optical flow, instead of paying for every frame. Measured 12.2x "
+             "fewer paid frames on a 60s reference clip. Track A only — a clip "
+             "backend already works on ranges.",
+    ),
+    residual_max: Optional[float] = typer.Option(
+        None, "--keyframe-residual-max",
+        help="A frame whose flow-explained residual exceeds this gets a new "
+             "paid keyframe. Higher = cheaper and more drift.",
+    ),
+    max_chain: Optional[int] = typer.Option(
+        None, "--keyframe-max-chain",
+        help="Hard ceiling on how many warps may be chained before forcing a "
+             "paid keyframe. Bounds drift regardless of residual.",
+    ),
     single_shot: bool = typer.Option(
         False, "--single-shot",
         help="Treat the whole clip as one shot: one seed throughout, and no "
@@ -588,6 +669,28 @@ def batch(
         price_unit=weights.firewalls.cost.unit_for(run.manifest.backend),
     )
     scorer, controller, references = _build_scoring(run, weights, backend, extracted, profile)
+
+    # ---- T18: adaptive keyframe propagation -----------------------------
+    if propagate_keyframes:
+        if run.manifest.mode == "resynth":
+            _fail(
+                "--propagate is Track A only. A clip backend already works on "
+                "ranges and produces its own temporal coherence; warping its "
+                "output would fight the thing it was bought for."
+            )
+        try:
+            total = _run_with_propagation(
+                run, weights, backend, profile, prompt, plan, ledger,
+                residual_max=residual_max, max_chain=max_chain,
+            )
+        except (propagate.PropagationError, RunHalted) as exc:
+            run.logger.error("batch.failed", error=str(exc))
+            _fail(str(exc))
+        typer.echo(
+            f"{total} frames produced with keyframe propagation — see "
+            f"{run.paths.keyframe_plan.name}"
+        )
+        raise typer.Exit(0)
 
     try:
         total = restyle_frames(

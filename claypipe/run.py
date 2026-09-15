@@ -172,6 +172,13 @@ class RunPaths:
         return self.root / "shots.json"
 
     @property
+    def keyframe_plan(self) -> Path:
+        """Which frames are paid for and which are warped (T18). Written by
+        `batch --propagate` BEFORE any spend, so the projected cost is visible
+        before a call goes out."""
+        return self.root / "keyframes.json"
+
+    @property
     def scores(self) -> Path:
         """Per-frame score log (SPEC §3): one JSON object per scored frame."""
         return self.root / "scores.jsonl"

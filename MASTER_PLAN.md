@@ -702,8 +702,54 @@ One commit per task with its own acceptance test, matching the T1-T8 convention.
 | **T15** | **Ledger price model.** `weights.yaml` gains `{backend: {unit: image\|megapixel\|video_second, rate, round_up_to_mp}}`. | **DONE.** 60s VACE 480p prices at exactly $2.40; the MP round-up trap is modelled (0.41MP bills as 1MP). `per_call()` REFUSES a non-per-image backend rather than answering. Unpriced backend still refused. Ledger records the unit and billed dimension. |
 | **T16** | **The bake-off, ~$0.95 total.** Track A 3-frame canary: Kontext pro ($0.12), SiliconFlow Kontext dev ($0.05), SDXL+CN ($0.02), SD1.5+CN+clay LoRA ($0.01), Qwen Edit ($0.09). Track C 3-second canary: Wan VACE 480p ($0.12), Aleph ($0.54). Print full component vectors. | A real clay-restyled frame and clip exist. Ledger reconciles to the cent. **Both mode target vectors set from measurement and recorded as decisions** (closes F4). |
 | **T17** | **Duration invariant (A2).** Replace frame-count equality with duration-within-one-frame plus the unchanged audio MD5 gate. Decimate 16 fps -> 12 fps on the restyled panel. | A VACE output passes the audio hash. Restyled panel measures 12 fps effective on the §1.2 test. Decision recorded against SPEC §3. |
-| **T18** | **Adaptive keyframe propagation (Track A).** Reuse the TF optical flow: restyle shot-first frames, warp forward, new keyframe when residual exceeds threshold. | A clip with §1.3 shot structure spends <= 60 paid frames. Propagated frames score TF >= 0.99. |
+| **T18** | **Adaptive keyframe propagation (Track A).** Reuse the TF optical flow: restyle shot-first frames, warp forward, new keyframe when residual exceeds threshold. | **DONE, one criterion met and one refuted.** <= 60 paid frames IS reachable: 59 of 720 on a real 60s slice (12.2x) with an unbounded chain; the shipped default is 12, giving 96 paid (7.5x), conservative for the reason in §8a. **TF >= 0.99 is NOT met and is the wrong criterion** — see §8a. |
 | **T19** | **Production backend.** Modal + SD1.5 + ControlNet + clay LoRA (Track A) and/or Modal + Wan VACE (Track C), both inside the free credits. | 12 s clip end-to-end under $0.05. F within 0.03 of the T16 winner or better. |
+
+### 8a. T18 — two measured findings that contradict T18's own premises
+
+Measured on a real 60-second reference slice (720 frames, 28 shots), with
+DummyBackend generating the keyframes.
+
+**FINDING 1 — temporal fidelity cannot validate propagation.** T18's second
+acceptance criterion is "propagated frames score TF >= 0.99". Measured:
+
+| max_chain | paid | reduction | TF min | TF mean | TF p5 | % >= 0.99 |
+|---|---|---|---|---|---|---|
+| 6 | 142 | 5.07x | 0.8833 | 0.9905 | 0.9587 | 75.4% |
+| 12 | 96 | 7.50x | 0.8784 | 0.9921 | 0.9676 | 79.0% |
+| 24 | 74 | 9.73x | 0.8951 | 0.9932 | 0.9755 | 83.0% |
+| unbounded | 59 | 12.20x | 0.9216 | 0.9947 | 0.9814 | 84.4% |
+
+TF gets **better** as chains get **longer** — the exact opposite of the drift
+intuition the chain limit was built on. The reason is structural: a warped
+frame is by construction a smooth resampling of its predecessor, so it is
+almost perfectly temporally consistent, while a KEYFRAME is a fresh generation
+that does not match its predecessor. Every keyframe *insertion* is a temporal
+discontinuity, so fewer keyframes means better TF.
+
+So TF does not measure propagation drift; it measures how often a chain is
+interrupted. The criterion is not met (84.4% at best, mean 0.9947, min 0.92)
+and tightening it would not make it meaningful. What catches smear is fidelity
+TO THE SOURCE — SSIM and LPIPS-edges — not frame-to-frame consistency.
+
+**FINDING 2 — SSIM-vs-source is flat in chain depth on this footage.** A
+40-warp chain loses ~0.05 SSIM against its own source (0.367 at the keyframe,
+0.315 at depth 40-44), so the chain limit earns very little here.
+
+**Why the shipped default is still conservative (12, not unbounded):** both
+measurements used DummyBackend, whose output is flat posterised colour fields.
+Resampling a flat field is nearly lossless, so the dummy *cannot* exhibit the
+drift that repeated resampling would cause in real clay texture, fingerprints
+and tool marks — its evidence that long chains are safe is weakest exactly
+where it matters. 12 still buys 7.5x ($3.84/clip instead of $28.80 on Kontext
+pro); `--keyframe-max-chain` raises it, and 12.2x / 59 paid frames is where the
+"<= 60" target lands. **Re-measure at T16 against a real backend before
+changing the default.**
+
+A note on the absolute SSIM figures: 0.33-0.37 against a target of 0.72 is not
+a propagation failure, it is the dummy backend scoring against real footage —
+the same posterise scores above 0.72 on the synthetic fixtures. That is F4 and
+D48 again.
 
 ### Phase 3 — Make it visible
 
