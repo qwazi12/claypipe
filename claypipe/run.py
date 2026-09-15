@@ -58,6 +58,13 @@ class RunManifest(BaseModel):
     style: str
     fps: int
     backend: str
+    # T13: which TRACK this run is. "surface" = per-frame img2img (geometry
+    # preserved, structure is the thing graded). "resynth" = video-native
+    # resynthesis (geometry legitimately moves; temporal consistency is the
+    # claim). The mode decides the target vector AND the retry policy, so it is
+    # run identity, fixed at intake — changing it mid-run would score the first
+    # half of a clip against a different gate than the second.
+    mode: str = "surface"
     reference_images: list[str] = Field(default_factory=list)
     # T10/F1: WHERE the identity references came from, which decides whether
     # the ID metric is measuring anything useful.
@@ -188,6 +195,7 @@ class Run:
         backend: str,
         clip_title: str,
         duration_s: float,
+        mode: str = "surface",
         source_width: int = 0,
         source_height: int = 0,
         styles: StylesConfig,
@@ -211,6 +219,7 @@ class Run:
             style=style,
             fps=fps,
             backend=backend,
+            mode=mode,
         )
         run = cls(paths=paths, manifest=manifest, logger=RunLogger(run_id, paths.log, echo))
         run.save()

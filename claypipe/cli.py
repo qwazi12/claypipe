@@ -72,6 +72,12 @@ def intake(
     title: Optional[str] = typer.Option(None, "--title", help="Header bar text (default: filename)"),
     fps: Optional[int] = typer.Option(None, "--fps", help="Extraction fps (default: styles.yaml)"),
     backend: str = typer.Option("dummy", "--backend", help="Restyle backend: dummy | fal"),
+    mode: str = typer.Option(
+        "surface", "--mode",
+        help="Track: surface (per-frame img2img, geometry preserved) or "
+             "resynth (video-native, geometry moves). Decides the target "
+             "vector AND the retry policy, so it is fixed at intake.",
+    ),
     runs_dir: Optional[Path] = typer.Option(None, "--runs-dir", help="Override output directory"),
     ref: list[Path] = typer.Option(
         [], "--ref",
@@ -80,9 +86,15 @@ def intake(
     ),
 ) -> None:
     """STAGE 0 — register a clip and lock its style + character references."""
-    styles, _, _ = _startup()
+    styles, weights, _ = _startup()
     try:
         styles.profile(style)
+    except ConfigError as exc:
+        _fail(str(exc))
+    # T13: an unknown mode is a hard failure here, before any I/O — a run
+    # created with a mode weights.yaml does not define could never be scored.
+    try:
+        mode_cfg = weights.mode(mode)
     except ConfigError as exc:
         _fail(str(exc))
 
@@ -113,6 +125,7 @@ def intake(
         style=style,
         fps=fps or styles.render.default_fps,
         backend=backend,
+        mode=mode,
         clip_title=title or video.stem,
         duration_s=duration,
         source_width=source_width,
@@ -129,6 +142,8 @@ def intake(
         style=style,
         fps=run.manifest.fps,
         backend=backend,
+        mode=mode,
+        mode_calibrated=mode_cfg.calibrated,
         duration_s=duration,
         references=len(ref),
         source_size=f"{source_width}x{source_height}",
@@ -467,6 +482,17 @@ def batch(
     # FIREWALL 0: intent and credentials, before anything touches the disk.
     _guard_paid_backend(run.manifest.backend, live=live)
 
+    # FIREWALL 0b (T13/F4): a PAID run in a mode whose target vector was never
+    # measured is refused. An uncalibrated mode's numbers have the right shape
+    # and no evidence, so the gate would either pass everything or reject
+    # everything — both of which look like a working run until the bill lands.
+    # Free backends are exempt: an unscored dummy run (D27) gates nothing.
+    if run.manifest.backend in PAID_BACKENDS:
+        try:
+            weights.assert_mode_is_spendable(run.manifest.mode)
+        except ConfigError as exc:
+            _fail(str(exc))
+
     # FIREWALL 1: no approved canary verdict -> no spend. Checked before the
     # backend is even constructed, and long before the ledger authorises a call.
     verdict = _require_canary(run, weights, wait=wait_for_canary)
@@ -515,6 +541,13 @@ def batch(
         except shots.ShotDetectionError as exc:
             _fail(str(exc))
 
+    run.logger.info(
+        "batch.mode",
+        mode=run.manifest.mode,
+        calibrated=weights.mode(run.manifest.mode).calibrated
+        if run.manifest.mode in weights.modes else None,
+        price_unit=weights.firewalls.cost.unit_for(run.manifest.backend),
+    )
     scorer, controller, references = _build_scoring(run, weights, backend, extracted, profile)
 
     try:
@@ -1160,7 +1193,7 @@ def status(
     runs_dir: Optional[Path] = typer.Option(None, "--runs-dir"),
 ) -> None:
     """Progress for one run: what has happened, and what has not."""
-    styles, _, _ = _startup()
+    styles, weights, _ = _startup()
     base = runs_dir or styles.output.runs_dir
     try:
         run = Run.load(resolve_run(run_dir, Path(base)), echo=False)
@@ -1172,8 +1205,20 @@ def status(
     restyled = count_frames(run.paths.restyled_frames)
     typer.echo(f"run        {m.run_id}")
     typer.echo(f"created    {m.created_at}")
-    typer.echo(f"source     {m.source_path}")
+    typer.echo(f"source     {m.source_path}  ({m.source_width}x{m.source_height})")
     typer.echo(f"style/fps  {m.style} @ {m.fps}fps   backend={m.backend}")
+    # T13: the mode decides the target vector AND the retry policy, and an
+    # uncalibrated mode cannot spend — so it is stated, with its calibration
+    # state, rather than left for the operator to infer (Rule 40).
+    calibration = "unknown mode"
+    if m.mode in weights.modes:
+        cfg = weights.mode(m.mode)
+        calibration = "calibrated" if cfg.calibrated else "NOT CALIBRATED — paid runs refused"
+    typer.echo(f"mode       {m.mode} ({calibration})")
+    typer.echo(
+        f"pricing    {m.backend} bills per "
+        f"{weights.firewalls.cost.unit_for(m.backend)}"
+    )
     typer.echo(f"frames     extracted={extracted}  restyled={restyled}")
     typer.echo(f"audio      {'present' if run.paths.audio.is_file() else 'not extracted'}")
     typer.echo(f"final      {run.paths.final if run.paths.final.is_file() else 'not assembled'}")
@@ -1182,7 +1227,38 @@ def status(
         typer.echo(f"verdict    {card.get('verdict')}")
     # Stated plainly rather than shown as an empty field (Rule 40).
     typer.echo("scoring    live on paid backends; skipped on dummy (D27)")
-    typer.echo("captions   not built yet (burned in automatically once subs.srt exists)")
+    # T12 replaced the libass burn-in with a caption track composited into the
+    # gap band, so this line was stale — Rule 33 drift, fixed with the feature.
+    if run.paths.cues.is_file():
+        try:
+            cue_count = len(captions.load_cues(run.paths.cues))
+            typer.echo(
+                f"captions   {cue_count} cues in {run.paths.cues.name} "
+                "— rendered into the gap band by `assemble`"
+            )
+        except captions.CaptionError as exc:
+            typer.echo(f"captions   {run.paths.cues.name} is UNREADABLE: {exc}")
+    else:
+        typer.echo(
+            "captions   none (run `claypipe captions`, or hand-author cues.json)"
+        )
+    references = "none — a paid run will be refused"
+    if m.reference_images:
+        references = f"{len(m.reference_images)} from {m.reference_origin}"
+        if m.reference_origin != "canary":
+            references += "  [F1 RISK: approve a canary to re-point them]"
+    typer.echo(f"identity   {references}")
+    if run.paths.shot_plan.is_file():
+        try:
+            plan = shots.ShotPlan.read(run.paths.shot_plan)
+            typer.echo(
+                f"shots      {len(plan.shots)} shots / {plan.cuts} cuts, "
+                f"seeds {plan.shots[0].seed}-{plan.shots[-1].seed}"
+            )
+        except Exception:
+            typer.echo("shots      shots.json is unreadable")
+    else:
+        typer.echo("shots      not detected yet (batch or canary restyle detects them)")
 
 
 if __name__ == "__main__":

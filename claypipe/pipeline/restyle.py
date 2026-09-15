@@ -36,6 +36,55 @@ class RestyleBackend(Protocol):
         """Read `src`, write the restyled image to `dst`."""
 
 
+@runtime_checkable
+class ClipRestyleBackend(Protocol):
+    """One restyled CLIP RANGE per call — the Track C seam (T13/A4).
+
+    Deliberately a SEPARATE protocol rather than a generalisation of
+    `RestyleBackend`. The two look similar and behave nothing alike:
+
+      * RETRY. A failed frame reseeds one frame. A failed chunk reseeds 81-240
+        frames at once, so one Track C retry can cost more than ten Track A
+        retries. Collapsing them into one protocol would mean one retry cap and
+        one budget fraction for two units of wildly different price.
+      * TIMING. A per-frame backend cannot change the frame count. A clip
+        backend works in chunks at its own frame rate (VACE: 81-240 frames at
+        16fps), which is why the frame-count invariant becomes a DURATION
+        invariant plus the unchanged audio hash (A2/T17).
+      * FAILURE GRANULARITY. A frame either exists or does not. A chunk can
+        come back the wrong length, which is a distinct failure with no
+        per-frame analogue.
+
+    Generalising one into the other would hide all three differences behind a
+    shared signature. Two protocols, one seam.
+    """
+
+    name: str
+    # Chunk bounds the backend can actually honour. VACE is 81-240 at 16fps.
+    min_chunk_frames: int
+    max_chunk_frames: int
+    native_fps: int
+
+    def cost_per_video_second_usd(self) -> float:
+        """Estimated spend per video-second. Drives the cost firewalls."""
+
+    def restyle_clip(
+        self,
+        src_frames: "list[Path]",
+        out_dir: Path,
+        *,
+        prompt: str,
+        strength: float,
+        seed: int,
+    ) -> "list[Path]":
+        """Restyle a contiguous range of frames. Returns what it wrote.
+
+        The returned list is CHECKED against the input length by the caller: a
+        chunk that comes back short would otherwise shorten the clip and break
+        the duration invariant silently.
+        """
+
+
 class DummyBackend:
     """PIL-based cartoonizer. Offline, free, deterministic.
 

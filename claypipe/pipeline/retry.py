@@ -192,13 +192,30 @@ class SpendLedger:
     def project_total(self) -> float:
         return self._total(self.project_ledger)
 
-    def authorize(self, *, frame: str, backend: str, stage: str) -> str:
+    def authorize(
+        self,
+        *,
+        frame: str,
+        backend: str,
+        stage: str,
+        megapixels: float | None = None,
+        video_seconds: float | None = None,
+    ) -> str:
         """Check both caps, then record the intent to spend. Returns entry id.
 
         Raises RunHalted BEFORE any money is committed if the projected total
         would breach a cap.
+
+        T15: the estimate is UNIT-AWARE. A per-megapixel or per-video-second
+        backend is priced from the geometry or duration supplied here; passing
+        neither for such a backend raises rather than quietly pricing the call
+        as if it were one image, which would under-report spend by whatever the
+        real size or duration was and leave the caps not binding.
         """
-        estimate = self.cfg.cost.per_call(backend)
+        estimate = self.cfg.cost.price_for(
+            backend, megapixels=megapixels, video_seconds=video_seconds
+        )
+        unit = self.cfg.cost.unit_for(backend)
         projected_run = round(self.run_total() + estimate, 6)
         projected_project = round(self.project_total() + estimate, 6)
 
@@ -245,6 +262,12 @@ class SpendLedger:
             "entry_id": entry_id, "event": "authorized", "at": utc_now(),
             "run_id": self.run_id, "frame": frame, "stage": stage,
             "backend": backend, "estimated_usd": estimate,
+            # T15: the unit and the billed dimension are recorded, not just the
+            # dollar figure. Reconciling a bill against a ledger that says only
+            # "$0.05" cannot tell a 2-megapixel image from two 1-megapixel ones.
+            "unit": unit,
+            "megapixels": megapixels,
+            "video_seconds": video_seconds,
         }
         self._entries[entry_id] = record
         self._append(self.run_ledger, record)
@@ -253,6 +276,7 @@ class SpendLedger:
             self.logger.info(
                 "spend.authorized", entry_id=entry_id, frame=frame, stage=stage,
                 estimated_usd=estimate, run_total_usd=projected_run,
+                unit=unit, megapixels=megapixels, video_seconds=video_seconds,
             )
         return entry_id
 

@@ -93,6 +93,11 @@ def build_card(run: Run, *, frames: int, verdict: str, extra: dict[str, Any] | N
         "source_sha256": run.manifest.source_sha256,
         "style": run.manifest.style,
         "backend": run.manifest.backend,
+        # T13: the mode decides which target vector the scores above were
+        # graded against, so a card without it cannot be compared to another
+        # card. `runs.mode` is also what the dashboard needs to render the
+        # right targets (MASTER_PLAN §5).
+        "mode": run.manifest.mode,
         "fps": run.manifest.fps,
         "frames": frames,
         "scores": summarise_scores(run.paths.scores),

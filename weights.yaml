@@ -127,9 +127,53 @@ firewalls:
   cost:
     # Estimated USD per restyle call, per backend. Charged to the ledger BEFORE
     # the call is made, then reconciled with the actual afterwards.
+    #
+    # This map is the per-IMAGE shorthand. A backend that bills per megapixel
+    # or per video-second needs a `pricing` entry below instead — see T15.
     estimated_usd_per_call:
       dummy: 0.0
       fal: 0.035
+
+    # T15/F3 — WHAT a backend charges for, not just how much. A flat per-call
+    # number silently mis-prices two thirds of the candidate backends, giving a
+    # ledger that reconciles to the wrong figure and spend caps that do not
+    # bind. Prices researched 2026-09-14; VERIFY IN CONSOLE before a batch,
+    # several are promotional.
+    #
+    # `round_up_to_mp: true` is fal's actual billing rule, and it inverts an
+    # optimisation: fal rounds UP to the next whole megapixel, so 640x640
+    # (0.41MP) pays the 1MP rate. On a hosted per-MP backend the cheap move is
+    # to render LARGE; on self-hosted GPU, cost is roughly linear in pixels, so
+    # the cheap move is to render SMALL. Render geometry therefore cannot be a
+    # fixed aesthetic constant.
+    pricing:
+      dummy:
+        unit: image
+        rate: 0.0
+      # Flux Kontext [pro] via fal — the current default, and the most
+      # expensive realistic option at $28.80 per 60s clip at 12fps.
+      fal:
+        unit: image
+        rate: 0.035
+      # Track A per-megapixel candidates.
+      fal_kontext_dev:
+        unit: megapixel
+        rate: 0.025
+        round_up_to_mp: true
+      fal_qwen_image_edit:
+        unit: megapixel
+        rate: 0.03
+        round_up_to_mp: true
+      # Track C, per video-second. $2.40 for a 60s clip at 480p.
+      wan_vace_480p:
+        unit: video_second
+        rate: 0.04
+      wan_vace_720p:
+        unit: video_second
+        rate: 0.08
+      runway_aleph:
+        unit: video_second
+        rate: 0.18
     # Hard caps. null = uncapped. `--max-cost-usd` overrides the run cap.
     # The PROJECT cap is SPEC Addendum A3: the per-run cap alone does not stop
     # ten aborted runs at $19 each costing $190.
@@ -163,3 +207,71 @@ review:
   # How long `poll_canary_verdict` waits for a human before giving up.
   canary_timeout_s: 600
   canary_poll_s: 1.0
+
+# --------------------------------------------------------------------------
+# T13/A1 — PER-MODE TARGET VECTORS.
+#
+# The scoring gate is mode-dependent, and this is not a tuning preference:
+#
+#   surface (Track A, per-frame img2img)
+#       Geometry is PRESERVED and the surface is transformed. Structure
+#       preservation is the goal, so SSIM 0.72 and LPIPS-edges 0.35 are
+#       correct — they are measuring the thing that must not change.
+#
+#   resynth (Track C, video-native — Wan VACE, Runway Aleph)
+#       The model RESYNTHESISES rather than reskins, so a good frame
+#       legitimately moves geometry. The surface targets would reject it.
+#       But temporal consistency is Track C's entire claim over Track A, so
+#       tf_min goes UP, not down: a resynthesis model that flickers has no
+#       reason to exist.
+#
+# `surface` restates the canonical `targets` / `firewalls` numbers above
+# EXACTLY. config.py validates that they match, so the restatement cannot
+# drift — it exists so Track C can differ, not so the two can diverge.
+#
+# `max_retries_per_unit` differs by mode for a structural reason (A4): a failed
+# FRAME reseeds one frame, a failed CLIP CHUNK reseeds 81-240 frames at once.
+# One Track C retry can consume more budget than ten Track A retries, so
+# sharing a cap would let a single chunk failure eat the run.
+modes:
+  surface:
+    targets:
+      ssim_min: 0.72
+      lpips_edges_max: 0.35
+      id_min: 0.85
+      tf_min: 0.95
+    aggregation: block_p95
+    max_retries_per_unit: 2
+    total_retry_budget_fraction: 0.15
+    calibrated: true
+    calibration_note: >-
+      Restates the canonical Track A targets, which were set by Decisions 1
+      and 2 (memory.md D13/D14) and exercised against 11 fixture cases.
+      NOTE: those fixtures are deterministic arithmetic, not generative
+      output, so finding F4 still applies to the absolute values — T16 is the
+      first real datum. Marked calibrated because these numbers have been
+      shipping and gating since step 3, not because F4 is resolved.
+
+  resynth:
+    # PLACEHOLDERS. Correct SHAPE, no measurement behind them. `calibrated:
+    # false` makes a paid run in this mode a REFUSAL, not a gamble.
+    targets:
+      ssim_min: 0.45
+      lpips_edges_max: 0.55
+      id_min: 0.80
+      # HIGHER than surface, deliberately. Temporal consistency is what Track C
+      # is bought for.
+      tf_min: 0.97
+    aggregation: block_p95
+    # One retry per chunk, not two: a chunk retry is 81-240 frames of spend.
+    max_retries_per_unit: 1
+    # 5%, not 15%: the same fraction of a per-chunk budget authorises far more
+    # money than it does per frame.
+    total_retry_budget_fraction: 0.05
+    calibrated: false
+    calibration_note: >-
+      NEVER MEASURED. These have the right shape and no evidence. Set them
+      from the T16 clip canary (Wan VACE 480p, 3 seconds, ~$0.12) and flip
+      calibrated to true in the same commit that records the decision. Until
+      then a paid resynth run is refused by
+      WeightsConfig.assert_mode_is_spendable.
