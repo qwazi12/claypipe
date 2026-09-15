@@ -753,3 +753,72 @@ def test_the_flag_page_explains_why_tf_cannot_do_this():
 def test_max_chain_default_is_unchanged_by_t18a():
     """The brief is explicit: do not move it on dummy-backend evidence."""
     assert DEFAULT_MAX_CHAIN == 12
+
+
+def test_propagate_warns_when_the_source_has_burned_in_text(test_clip: Path, tmp_path: Path):
+    """MEASURED on a real 59s sample: propagation carries burned-in text
+    forward from each keyframe, so the restyled panel shows captions from the
+    wrong moment — 61.1% of propagated frames on the Young Sheldon clip.
+
+    Neither metric catches it. TF is circular on a warped frame, and T18a's
+    whole-frame SSIM averages the defect away because the caption band is only
+    ~7% of the frame area. So the operator has to be told.
+    """
+    from typer.testing import CliRunner
+
+    from claypipe.cli import app
+    from claypipe.run import Run
+
+    run = Run.create(
+        source=test_clip, style="clay", fps=12, backend="dummy", mode="surface",
+        clip_title="Ghosting", duration_s=5.0,
+        source_width=1280, source_height=720,
+        styles=load_styles(), runs_dir=tmp_path / "runs", echo=False,
+    )
+    run.manifest.burned_in_text = {
+        "detected": True, "kind": "captions", "band_top": 297,
+        "band_bottom": 342, "frame_height": 640,
+    }
+    run.save()
+    (run.paths.root / "canary_verdict.json").write_text(
+        json.dumps({"schema_version": 1, "approved": True, "decider": "test"})
+    )
+    result = CliRunner().invoke(
+        app, ["batch", str(run.paths.root), "--runs-dir", str(tmp_path / "runs"),
+              "--propagate"],
+    )
+    assert result.exit_code == 0, result.output
+
+    logged = [json.loads(line) for line in run.paths.log.read_text().splitlines()]
+    warning = next(e for e in logged if e["event"] == "batch.propagate.burned_in_text")
+    assert warning["level"] == "WARN"
+    assert "wrong moment" in warning["consequence"]
+    # It must name why the existing metrics do not cover it, or the operator
+    # will assume the drift score already checked.
+    assert "circular" in warning["consequence"]
+    assert "--propagate" in warning["fix"]
+
+
+def test_propagate_is_silent_when_the_source_is_clean(test_clip: Path, tmp_path: Path):
+    from typer.testing import CliRunner
+
+    from claypipe.cli import app
+    from claypipe.run import Run
+
+    run = Run.create(
+        source=test_clip, style="clay", fps=12, backend="dummy", mode="surface",
+        clip_title="Clean", duration_s=5.0,
+        source_width=1280, source_height=720,
+        styles=load_styles(), runs_dir=tmp_path / "runs", echo=False,
+    )
+    run.manifest.burned_in_text = {"detected": False, "kind": "none"}
+    run.save()
+    (run.paths.root / "canary_verdict.json").write_text(
+        json.dumps({"schema_version": 1, "approved": True, "decider": "test"})
+    )
+    CliRunner().invoke(
+        app, ["batch", str(run.paths.root), "--runs-dir", str(tmp_path / "runs"),
+              "--propagate"],
+    )
+    logged = [json.loads(line) for line in run.paths.log.read_text().splitlines()]
+    assert not any(e["event"] == "batch.propagate.burned_in_text" for e in logged)

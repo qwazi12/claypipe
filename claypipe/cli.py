@@ -804,6 +804,54 @@ def batch(
 
     # ---- T18: adaptive keyframe propagation -----------------------------
     if propagate_keyframes:
+        # MEASURED CONSEQUENCE of combining T9b with T18, found by looking at a
+        # rendered 59s sample: on a source with burned-in text, propagation
+        # makes the restyled panel show captions FROM THE WRONG MOMENT. A
+        # keyframe captures whatever caption was on screen, and every frame
+        # warped from it carries that text forward after the source caption has
+        # changed or gone. Measured on the Young Sheldon clip: 61.1% of
+        # propagated frames had a caption band differing from their source by
+        # more than 1% ink coverage, with the worst cases showing 10-12% ink
+        # where the source had none.
+        #
+        # It is NOT drift-with-depth — the mean mismatch is flat across chain
+        # depth (0.023 at depth 0-3, 0.018 at 12-15) because the error is
+        # inherited whole from the keyframe at the first warp, not accumulated.
+        #
+        # And NEITHER metric catches it: TF is circular on a warped frame, and
+        # T18a's whole-frame SSIM averages the defect away because the caption
+        # band is only ~7% of the frame area (measured frame 94: 0.115 inside
+        # the band, 0.288 whole-frame).
+        burn = run.manifest.burned_in_text or {}
+        if burn.get("detected"):
+            run.logger.warn(
+                "batch.propagate.burned_in_text",
+                kind=burn.get("kind"),
+                band_top=burn.get("band_top"),
+                band_bottom=burn.get("band_bottom"),
+                consequence=(
+                    "propagation will carry burned-in text forward from each "
+                    "keyframe, so the restyled panel shows captions from the "
+                    "wrong moment. Measured at 61% of propagated frames on a "
+                    "comparable clip. Neither TF nor the T18a drift score "
+                    "detects it: TF is circular on a warped frame, and "
+                    "whole-frame SSIM averages away a defect confined to ~7% "
+                    "of the frame."
+                ),
+                fix="drop --propagate on this source, or accept the ghosting",
+            )
+            typer.secho(
+                "WARNING: this source has burned-in "
+                f"{burn.get('kind', 'text')} AND --propagate is on. Warped "
+                "frames inherit their keyframe's text, so the restyled panel "
+                "will show captions from the wrong moment (~61% of propagated "
+                "frames on a comparable clip).\n"
+                "  -> neither TF nor the drift score catches this: TF is "
+                "circular on a warped frame, and the caption band is only ~7% "
+                "of the frame so whole-frame SSIM averages it away.\n"
+                "  -> drop --propagate on this source, or accept the ghosting.",
+                fg=typer.colors.YELLOW, err=True,
+            )
         if run.manifest.mode == "resynth":
             _fail(
                 "--propagate is Track A only. A clip backend already works on "
