@@ -8,11 +8,22 @@
 - **TARGET LOOK IS CLAYMATION (operator, 2026-09-14).** The two @trevorcarlee
   reference clips are LEGO-minifig restyles. They are the reference for FORMAT,
   LAYOUT, CADENCE and METHOD — never for the look. See D40.
-- **PHASE 1 OF MASTER_PLAN §8 IS COMPLETE: T9, T10, T11, T12.** pytest 299
-  passed / 3 skipped / 0 failed. The 3 skips are real-footage measurements that
-  skip unless CLAYPIPE_REFERENCE_CLIP_A/B point at the reference clips.
-- Phase 2 (T13-T19) is NOT started. T13/T14/T15/T18 are pure local code and
-  unblocked. T16 needs real spend (and B1 settled). T19 needs a Modal account.
+- **PHASE 1 COMPLETE: T9, T10, T11, T12.**
+- **PHASE 2 PARTIALLY COMPLETE: T13, T14, T15, T18 done.** T16 (the bake-off)
+  and T19 (Modal) are BLOCKED on operator action; T17's code is local but needs
+  a real Track C output to verify against.
+- pytest **372 passed / 3 skipped / 0 failed** (from 190 at day start). The 3
+  skips are real-footage measurements that skip unless
+  CLAYPIPE_REFERENCE_CLIP_A/B point at the reference clips.
+- **THE FULL PIPELINE RUNS END TO END ON A REAL 60-SECOND CLIP** with every
+  Phase 1+2 feature on, verified 2026-09-14:
+  `intake -> canary restyle (3 frames) -> approve (refs locked from the
+  approved output) -> batch --propagate (95 paid + 3 resumed + 622 warped =
+  720, 7.5x) -> 8 cues incl. 4 non-dialogue -> assemble`
+  Output 1080x1920 h264 12fps, 720 frames, 60.02s. Audio MD5
+  `696ef9ddd2d9b391db3b40fdb0846a79` identical across `audio.aac`, the ORIGINAL
+  SOURCE and the output. Layout 316/608/72 derived from the 16:9 source.
+  A frame was extracted and LOOKED AT — which is how D51 was found.
 - Phases 3-4 (T20-T24) not started. T21/T22 need a Railway account decision
   (B3). T24 is blocked on B2.
 - **FAL_KEY is installed locally** at `.env` (gitignored, mode 600, verified
@@ -609,30 +620,138 @@
   frames. T16 is the first real datum; do not treat fixture numbers as
   calibration.
 
+- **D49 (2026-09-14, T13/T15) THE SCORING GATE AND THE PRICE MODEL ARE BOTH
+  MODE- AND UNIT-DEPENDENT.**
+  `modes:` in weights.yaml carries a target vector AND a retry policy per track.
+  `modes.surface` restates the canonical `targets`/`firewalls` numbers exactly
+  and a validator refuses a mismatch on any of the six — the restatement exists
+  so Track C can differ, not so the two can drift (Rule 31).
+  The resynth difference is NOT "looser everywhere": it relaxes ssim/lpips/id
+  and **TIGHTENS tf_min to 0.97**, because temporal consistency is what Track C
+  is bought for. A resynthesis model that flickers has no reason to exist.
+  Per-mode retry policy for a structural reason (A4): a failed FRAME reseeds one
+  frame, a failed CLIP CHUNK reseeds 81-240 frames. resynth gets
+  `max_retries_per_unit: 1` (not 2) and a 5% budget (not 15%).
+  **NEW F4 FIREWALL: `resynth.calibrated: false`, and FIREWALL 0b refuses a PAID
+  run in an uncalibrated mode.** Its numbers have the right shape and no
+  evidence. The refusal names T16 as the way out. An uncalibrated mode must
+  carry a `calibration_note` so a future session can tell a placeholder from a
+  measurement. **T16 must set these numbers and flip the flag in the SAME
+  commit that records the decision.**
+  T15 pricing: `{unit: image|megapixel|video_second, rate, round_up_to_mp}`.
+  Verified 60s of Wan VACE 480p prices at exactly $2.40. `round_up_to_mp` is
+  fal's real billing rule and INVERTS an optimisation — 0.41MP (640x640) bills
+  as 1MP, so on a hosted per-MP backend render LARGE, and on self-hosted GPU
+  (cost linear in pixels) render SMALL. Render geometry therefore cannot be a
+  fixed aesthetic constant.
+  Three REFUSALS rather than conveniences: `per_call()` on a non-per-image
+  backend raises instead of answering; pricing a unit backend without its
+  dimension raises; an unpriced backend is still refused. The ledger records the
+  unit and billed dimension, because an entry saying only "$0.05" cannot tell a
+  2-megapixel image from two 1-megapixel ones.
+- **D50 (2026-09-14, T14) A TRACK C RUN CANNOT BE APPROVED BY THREE STILLS, AND
+  THE PLAN'S 3-SECOND/$0.12 VACE CANARY IS NOT PURCHASABLE.**
+  `canary restyle --clip <seconds>`. FIREWALL 1b refuses a resynth run whose
+  canary was the wrong kind, and `canary restyle` without `--clip` refuses
+  outright in resynth mode — the wrong kind can be neither produced nor consumed.
+  **`canary_kind` lives on the MANIFEST, not in the verdict.** The verdict
+  arrives as a query string the operator pastes (D21), so a gate satisfiable by
+  editing a URL is not a gate (D17). There is a test that forges `canary_kind`
+  in the verdict and asserts the gate still holds.
+  The trim is anchored on the MOST-MOTION shot, not the clip head: a video
+  model's failure mode is temporal, and the opening seconds are often a static
+  establishing shot where none of it shows. Canarying the calm part of a clip is
+  how a temporal model passes a gate it should fail.
+  **CORRECTION TO THE PLAN:** a 3-second Wan VACE canary is neither purchasable
+  nor $0.12. VACE's floor is 81 frames at 16fps native = **5.06 video-seconds =
+  $0.20**. A 3-second canary at the pipeline's 12fps is 36 frames, which VACE
+  cannot honour — it bills its minimum, or pads, and padding changes the frame
+  count and breaks the duration invariant. Asking below the floor buys a
+  SMALLER canary at the SAME price. T14 warns with that arithmetic.
+  `DummyClipBackend` is deliberately INCONVENIENT — 16fps native against the
+  pipeline's 12, 81-240 frames per chunk — because those two facts are what
+  force the duration invariant (A2/T17). A convenient stand-in would let the
+  pipeline pass tests it should fail. It also MOVES GEOMETRY, or it would
+  exercise the surface gate instead of the resynth one.
+  `ChunkLengthError` is the failure with no per-frame analogue: a backend
+  returning 80 frames for 81 shortens the clip and desyncs the audio, in a file
+  that plays perfectly.
+  `dummy_clip` had to be PRICED in weights.yaml ($0/video-second). Not a
+  formality — an unpriced backend is refused outright, so an unlisted
+  dummy_clip made the whole Track C path untestable. The firewall caught this
+  on the first end-to-end run.
+- **D51 (2026-09-14, T18) TEMPORAL FIDELITY CANNOT VALIDATE PROPAGATION — TF
+  GETS *BETTER* WITH LONGER WARP CHAINS.** This is the most important finding of
+  the session and it contradicts T18's own acceptance criterion.
+  Measured on a real 60s slice (720 frames, 28 shots), DummyBackend keyframes:
+  | max_chain | paid | reduction | TF min | TF mean | % >= 0.99 |
+  |---|---|---|---|---|---|
+  | 6 | 142 | 5.07x | 0.8833 | 0.9905 | 75.4% |
+  | 12 | 96 | 7.50x | 0.8784 | 0.9921 | 79.0% |
+  | 24 | 74 | 9.73x | 0.8951 | 0.9932 | 83.0% |
+  | unbounded | 59 | 12.20x | 0.9216 | 0.9947 | 84.4% |
+  **Why:** a warped frame is by construction a smooth resampling of its
+  predecessor, so it is almost perfectly temporally consistent. A KEYFRAME is a
+  fresh generation that does NOT match its predecessor. Every keyframe
+  *insertion* is a temporal discontinuity, so fewer keyframes = better TF.
+  So TF does not measure propagation drift; it measures how often a chain is
+  interrupted. **T18's "propagated frames score TF >= 0.99" is NOT MET (84.4%
+  at best) and is the WRONG CRITERION.** What catches smear is fidelity TO THE
+  SOURCE (SSIM / LPIPS-edges), not frame-to-frame consistency. Do not "fix"
+  this by tightening tf_min.
+  T18's other criterion IS met: **59 paid frames of 720 (12.2x)**, under the
+  <=60 target, with an unbounded chain. The residual threshold does the real
+  work (177 paid at 0.03 -> 85 at 0.07, then saturates; 0.055 is the knee).
+  SSIM-vs-source also turned out FLAT in chain depth (0.367 at the keyframe,
+  0.315 at depth 40-44), so max_chain earns little on this footage.
+  **THE DEFAULT IS STILL max_chain=12, AND THE REASON MATTERS:** both
+  measurements used DummyBackend, whose output is flat posterised colour fields.
+  Resampling a flat field is nearly lossless, so the dummy CANNOT show the drift
+  repeated resampling would cause in real clay texture, fingerprints and tool
+  marks — its evidence that long chains are safe is weakest exactly where it
+  counts. 12 buys 7.5x ($3.84/clip vs $28.80 on Kontext pro).
+  **RE-MEASURE AT T16 ON A REAL BACKEND BEFORE RAISING IT.**
+  Also: the absolute SSIM figures (0.33-0.37 against a 0.72 target) are NOT a
+  propagation failure — that is the dummy backend scoring against real footage.
+  The same posterise scores above 0.72 on the synthetic fixtures. D48/F4 again.
+- **D52 (2026-09-14) A CAPTION BUG THAT ONLY LOOKING AT A FRAME COULD FIND.**
+  A two-line cue fitted to the full 72px gap height rendered EDGE TO EDGE (ink
+  rows 6..71) — technically inside the band, visually crossing into both panels,
+  which is the exact failure T12 exists to prevent. `assert_within_gap` PASSED
+  it, because it only checked containment.
+  Cause: TWO line-height definitions. `_fit_font` measured `getbbox("Ay")` (ink
+  extent), `render_cue_image` used `getmetrics()` (ascent+descent, taller). The
+  fitter approved a size that then rendered taller than it had measured. There
+  is now one `line_height_for` used by both.
+  Fixed on top of the cause: `CAPTION_VERTICAL_PADDING` (14%) so text CLEARS
+  both panels, and `assert_within_gap` now checks CLEARANCE, not containment.
+  **Lesson worth keeping: the end-to-end visual check is part of the work, not
+  a formality. No unit test caught this and the assertion actively passed it.**
+
 ## Pending / Next
-- **PHASE 2 (MASTER_PLAN §8), newest first. T13/T14/T15/T18 are unblocked local
-  code; start there.**
-  - T13 mode split: `ClipRestyleBackend` protocol alongside `RestyleBackend`;
-    a `modes:` block in weights.yaml (surface vs resynth target vectors);
-    per-mode retry caps and budgets; `runs.mode` persisted. UNBLOCKED.
-  - T14 clip canary: `canary --clip <seconds>` renders a 3-second trim. Same
-    gate, same verdict file, no override flag. UNBLOCKED.
-  - T15 ledger price model: `{backend: {unit: image|megapixel|video_second,
-    rate, round_up_to_mp}}`. fal bills per MP ROUNDED UP to the next whole
-    megapixel, so 640x640 (0.41MP) pays the 1MP rate. UNBLOCKED.
-  - T18 adaptive keyframe propagation: reuse the TF optical flow; restyle
-    shot-first frames, warp forward, new keyframe when residual exceeds
-    threshold. Budget against clip A's 28.9 shots/60s. UNBLOCKED.
-  - T16 the bake-off (~$0.95 total). BLOCKED on the operator confirming B1 and
-    authorising spend. This is the FIRST REAL DATUM for both mode target
-    vectors — see D48.
-  - T17 duration invariant: replace frame-count equality with
-    duration-within-one-frame plus the UNCHANGED audio MD5 gate. Decimate 16fps
-    -> 12fps on the restyled panel (decimation, NOT interpolation — it would
-    smooth out the stop-motion stepping D40 says is clay's signature).
-    Code is local; needs a Track C output to verify against.
-  - T19 production backend (Modal + SD1.5 + ControlNet + clay LoRA). BLOCKED on
-    a Modal account. A CLAY LoRA is the highest-leverage item on the cost table.
+- **NEXT UP — T16, THE BAKE-OFF. It is the gating task for everything left.**
+  ~$0.95 total. BLOCKED on the operator confirming B1 and authorising spend.
+  It is the first real datum for: both mode target vectors (D49 — the resynth
+  gate REFUSES paid runs until it lands), the T18 chain-length default (D51),
+  and every threshold F4/D48 says cannot be trusted from fixtures.
+  When it runs, `claypipe canary restyle` (Track A, 3 frames) and
+  `canary restyle --clip 5.1` (Track C — 5.06s is VACE's real floor per D50,
+  not the 3s the plan assumed) are the commands. Print the full component
+  vector per frame before batching.
+- T17 duration invariant: replace frame-count equality with
+  duration-within-one-frame plus the UNCHANGED audio MD5 gate. Decimate 16fps
+  -> 12fps on the restyled panel (decimation, NOT interpolation — it would
+  smooth out the stop-motion stepping D40 says is clay's signature). Code is
+  local; needs a real Track C output to verify against, so it follows T16.
+- T19 production backend (Modal + SD1.5 + ControlNet + clay LoRA). BLOCKED on a
+  Modal account. **A CLAY LoRA is the highest-leverage item on the cost table**
+  — it is what makes a $0.0023 SD1.5 call competitive with a $0.04 Kontext
+  call for this look, because the style stops having to be carried by the
+  prompt.
+- **RUNBOOK.md and CONFIG.md (Rule 33) are STILL NOT WRITTEN.** This is now a
+  larger gap than it was: the CLI grew `canary restyle`, `captions`,
+  `--propagate`, `--clip`, `--single-shot`, `--mode` and three new config
+  blocks this session. Overdue.
 - **BLOCKERS, operator-owned (MASTER_PLAN §0):**
   - **B1** — confirm `FAL_KEY` was ROTATED, not reused. D36 records a key pasted
     into a session transcript. A new key is installed at `.env` this session,
@@ -682,6 +801,23 @@
 - RUNBOOK.md / CONFIG.md (Rule 33) not written yet — due with step 6.
 
 ## Log (append-only, newest first)
+
+### 2026-09-14 (cont.) — Phase 2 partial: T13, T14, T15, T18
+- **T13+T15** per-mode target vectors, two backend protocols, unit-aware
+  pricing (D49). Commit `0875983`. Also fixed Rule 33 drift: `status` still
+  claimed captions were "not built yet".
+- **T14** clip canary (D50). Commit `c372e25`. Corrected the plan's
+  3-second/$0.12 VACE canary to its real 5.06s/$0.20 floor.
+- **T18** adaptive keyframe propagation (D51). Commit `5009dd3`. 12.2x fewer
+  paid frames measured; T18's TF>=0.99 criterion REFUTED as the wrong metric
+  and reported as not met rather than as passed.
+- **Caption overflow fix** (D52). Commit `fe16fe2`. Found by extracting a frame
+  from the end-to-end render and looking at it.
+- Full pipeline verified end to end on a real 60s clip — see Current State.
+- pytest 372 passed / 3 skipped / 0 failed. All commits pushed to origin/main.
+- NOT done: T16 (needs spend + B1), T17 (needs a Track C output), T19 (needs
+  Modal), Phase 3 (T20-T22, needs B3), Phase 4 (T23-T24, T24 needs B2).
+  RUNBOOK.md / CONFIG.md still unwritten.
 
 ### 2026-09-14 — MASTER_PLAN landed; Phase 1 (T9-T12) complete
 - `MASTER_PLAN.md` written as the single build plan, superseding the three
