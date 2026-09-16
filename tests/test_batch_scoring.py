@@ -149,6 +149,11 @@ def clip_reference(tmp_path: Path, test_clip: Path) -> Path:
 
 def make_run(tmp_path: Path, test_clip: Path, backend: str = "dummy", refs=()) -> Path:
     args = ["intake", str(test_clip), "--style", "clay",
+            # Deliberately the RETIRED per-frame path: every test in this file
+            # covers a PER-FRAME concern — the per-frame retry cap, the
+            # strength nudge on a missed target, the per-frame scorer wiring.
+            # A resynth run generates whole chunks and has no per-frame retry.
+            "--mode", "surface",
             "--runs-dir", str(tmp_path / "runs"), "--backend", backend]
     for r in refs:
         args += ["--ref", str(r)]

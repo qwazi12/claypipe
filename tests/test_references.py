@@ -285,6 +285,10 @@ def intaken_run(test_clip: Path, tmp_path: Path) -> Run:
     styles = load_styles()
     return Run.create(
         source=test_clip, style="clay", fps=12, backend="dummy",
+        # Deliberately the RETIRED per-frame path: these tests cover the
+        # THREE-FRAME canary's economics, which is a per-frame concern. A
+        # resynth run canaries a clip instead (T14/A3).
+        mode="surface",
         clip_title="Canary Stage", duration_s=ffmpeg.duration_seconds(test_clip),
         source_width=1280, source_height=720,
         styles=styles, runs_dir=tmp_path / "runs", echo=False,
@@ -306,7 +310,7 @@ def test_canary_restyle_pays_for_three_frames_not_the_clip(intaken_run: Run):
     restyled = frame_paths(intaken_run.paths.restyled_frames)
     assert len(restyled) == 3, f"expected 3 canary frames, got {len(restyled)}"
     # Extraction still covers the whole clip — it is free and `batch` needs it.
-    assert len(frame_paths(intaken_run.paths.source_frames)) == 60
+    assert len(frame_paths(intaken_run.paths.source_frames)) == 96
 
 
 def test_canary_restyle_is_unscored_because_references_do_not_exist_yet(
@@ -356,8 +360,8 @@ def test_canary_frames_are_not_paid_for_twice(intaken_run: Run):
     assert batch_entry["resumed"] == 3, (
         f"the canary's 3 paid frames were not reused: {batch_entry}"
     )
-    assert batch_entry["restyled"] == 57
-    assert batch_entry["total"] == 60
+    assert batch_entry["restyled"] == 93
+    assert batch_entry["total"] == 96
 
 
 def test_canary_restyle_refuses_a_paid_backend_without_live(intaken_run: Run):

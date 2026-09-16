@@ -25,7 +25,11 @@ runner = CliRunner()
 def run_path(tmp_path: Path, test_clip: Path) -> Path:
     runs_dir = tmp_path / "runs"
     result = runner.invoke(
-        app, ["intake", str(test_clip), "--style", "clay", "--runs-dir", str(runs_dir)]
+        app, ["intake", str(test_clip), "--style", "clay",
+              # Deliberately the RETIRED per-frame path: these tests cover
+              # per-frame concerns (prompt override, the free-backend lock).
+              "--mode", "surface",
+              "--runs-dir", str(runs_dir)]
     )
     assert result.exit_code == 0, result.output
     return Path(result.stdout.strip().splitlines()[-1])
@@ -81,8 +85,8 @@ def test_cli_batch_admits_on_canary_approved(run_path: Path) -> None:
 
     result = run_batch(run_path)
     assert result.exit_code == 0, result.output
-    assert "60 frames restyled" in result.output
-    assert restyled_count(run_path) == 60
+    assert "96 frames restyled" in result.output
+    assert restyled_count(run_path) == 96
 
 
 def test_cli_batch_writes_prompt_override_when_adjust(run_path: Path) -> None:
@@ -206,7 +210,7 @@ def test_free_backend_needs_neither_live_nor_a_key(run_path: Path, monkeypatch) 
 
     result = run_batch(run_path)
     assert result.exit_code == 0, result.output
-    assert restyled_count(run_path) == 60
+    assert restyled_count(run_path) == 96
 
 
 def test_backend_override_is_recorded_in_the_manifest(run_path: Path, monkeypatch) -> None:

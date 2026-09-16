@@ -243,7 +243,7 @@ def test_identical_consecutive_cues_are_rendered_once(tmp_path, layout, render_c
     try:
         render_caption_track(
             REFERENCE_CUES, out_dir=tmp_path / "c", layout=layout, render=render_cfg,
-            profile=profile, fps=12, total_frames=60,
+            profile=profile, fps=12, total_frames=96,
         )
     finally:
         mod.render_cue_image = original
@@ -255,7 +255,7 @@ def test_a_rerender_clears_stale_caption_frames(tmp_path, layout, render_cfg, pr
     out = tmp_path / "c"
     render_caption_track(
         REFERENCE_CUES, out_dir=out, layout=layout, render=render_cfg,
-        profile=profile, fps=12, total_frames=60,
+        profile=profile, fps=12, total_frames=96,
     )
     render_caption_track(
         REFERENCE_CUES[:1], out_dir=out, layout=layout, render=render_cfg,
@@ -356,7 +356,7 @@ def test_the_output_still_has_the_expected_frame_count_with_captions(run_with_fr
     run, styles, audio_md5 = run_with_frames
     save_cues(REFERENCE_CUES, run.paths.cues)
     result = assemble_stage.assemble(run, styles.render, styles.profile("clay"), audio_md5)
-    assert result["frames_actual"] == result["frames_expected"] == 60
+    assert result["frames_actual"] == result["frames_expected"] == 96
 
 
 # ---------------------------------------------------------------------------

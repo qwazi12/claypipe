@@ -23,7 +23,7 @@ from claypipe.run import Run
 from tests.conftest import TEST_CLIP
 
 EXPECTED_FPS = 12
-EXPECTED_FRAMES = 60  # 5s clip @ 12fps
+EXPECTED_FRAMES = 96  # 8s clip @ 12fps
 
 
 @pytest.fixture
@@ -252,7 +252,9 @@ def test_cli_round_trip(test_clip: Path, run_dir: Path) -> None:
     """intake -> batch -> assemble -> status through the actual CLI."""
     runner = CliRunner()
     intake = runner.invoke(
-        app, ["intake", str(test_clip), "--style", "lego", "--runs-dir", str(run_dir)]
+        app, ["intake", str(test_clip), "--style", "lego",
+              # The per-frame round trip, deliberately on the retired path.
+              "--mode", "surface", "--runs-dir", str(run_dir)]
     )
     assert intake.exit_code == 0, intake.output
     run_path = Path(intake.stdout.strip().splitlines()[-1])

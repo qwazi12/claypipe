@@ -180,6 +180,12 @@ def build_card(run: Run, *, frames: int, verdict: str, extra: dict[str, Any] | N
         # metric and the generation method are the same operation. This is the
         # independent check, scored against the SOURCE.
         "propagation_drift": summarise_drift(run.paths.drift),
+        # V5: where the generation seams fall, and whether the clay design held
+        # ACROSS them. A seam is where two independently generated chunks meet;
+        # on a shot cut a design shift is invisible, mid-shot it is a jump in
+        # the character's face. Per-chunk ID against the approved canary is
+        # what turns "the seams are here" into "and here is where it drifted".
+        "chunking": summarise_chunks(run.paths.chunk_plan, run.paths.scores),
         "auto_retries": None,
         "human_flags": None,
         "human_overrides": None,
@@ -211,6 +217,89 @@ def summarise_drift(path: Path) -> dict | None:
         "referenced drift until T16 measures one on a real backend."
     )
     return summary
+
+
+def summarise_chunks(chunk_path: Path, scores_path: Path) -> dict | None:
+    """Seam positions plus per-chunk identity, so drift is locatable.
+
+    None means the run was not chunked, which is a different statement from
+    "chunked with no drift" — the same rule summarise_scores follows.
+
+    The ID-DRIFT REPORT is the point. A 60s clip is several chunks and nothing
+    guarantees a character's clay design is the same in chunk 1 and chunk 4.
+    Reporting each chunk's identity against the approved canary, and the SPREAD
+    between chunks, is what surfaces the inconsistency that makes output read as
+    slop rather than animation.
+    """
+    if not chunk_path.is_file():
+        return None
+    from .chunks import ChunkPlan
+
+    plan = ChunkPlan.read(chunk_path)
+    out: dict[str, Any] = dict(plan.summary())
+    out["seam_frames"] = plan.seam_frames
+    out["note"] = (
+        "one seed for the whole run: under v2v the seed drives the generated "
+        "design, so changing it between chunks would redesign the character at "
+        "every seam"
+    )
+
+    if not scores_path.is_file():
+        out["identity_by_chunk"] = None
+        return out
+
+    by_chunk: dict[int, list[float]] = {}
+    supports: dict[int, set] = {}
+    for line in scores_path.read_text().splitlines():
+        if not line.strip():
+            continue
+        record = json.loads(line)
+        identity = record.get("identity")
+        if identity is None:
+            continue
+        index = _frame_number(record.get("frame", ""))
+        if index is None:
+            continue
+        for chunk in plan.chunks:
+            if chunk.start_frame <= index <= chunk.end_frame:
+                by_chunk.setdefault(chunk.index, []).append(float(identity))
+                support = record.get("id_support")
+                if support:
+                    supports.setdefault(chunk.index, set()).add(support)
+                break
+
+    if not by_chunk:
+        out["identity_by_chunk"] = None
+        return out
+
+    means = {}
+    for index in sorted(by_chunk):
+        values = by_chunk[index]
+        means[index] = round(sum(values) / len(values), 4)
+        
+    out["identity_by_chunk"] = [
+        {
+            "chunk": index,
+            "mean_id": means[index],
+            "worst_id": round(min(by_chunk[index]), 4),
+            "frames": len(by_chunk[index]),
+            "id_support": sorted(supports.get(index, [])),
+        }
+        for index in sorted(by_chunk)
+    ]
+    spread = max(means.values()) - min(means.values())
+    out["identity_spread_across_chunks"] = round(spread, 4)
+    out["identity_drift_note"] = (
+        "spread between the best and worst chunk's mean identity. There is no "
+        "calibrated threshold for it until a canary measures one, so it is "
+        "REPORTED, not gated."
+    )
+    return out
+
+
+def _frame_number(name: str) -> int | None:
+    digits = "".join(c for c in Path(name).stem if c.isdigit())
+    return int(digits) if digits else None
 
 
 def write_card(run: Run, card: dict, history_dir: Path) -> Path:

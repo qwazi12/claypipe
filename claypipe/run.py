@@ -196,6 +196,14 @@ class RunPaths:
         return self.root / "keyframes.json"
 
     @property
+    def chunk_plan(self) -> Path:
+        """Generation chunks and where their seams fall (V5). A seam is where
+        two independently generated chunks meet and the clay design can shift;
+        on a cut that is invisible, mid-shot it is a jump in the character's
+        face."""
+        return self.root / "chunks.json"
+
+    @property
     def drift(self) -> Path:
         """Source-referenced drift scores for propagated frames (T18a).
 

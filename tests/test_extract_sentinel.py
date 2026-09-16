@@ -22,7 +22,7 @@ from claypipe.pipeline.extract import (
 )
 
 FPS = 12
-EXPECTED = 60
+EXPECTED = 96  # 8s test clip @ 12fps
 
 
 @pytest.fixture

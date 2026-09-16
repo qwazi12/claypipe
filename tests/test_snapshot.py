@@ -27,11 +27,20 @@ def finished_run(tmp_path: Path, test_clip: Path) -> Path:
               "--runs-dir", str(runs_dir)]
     )
     run_path = Path(intake.stdout.strip().splitlines()[-1])
+    # The v2v workflow: a resynth run needs a CLIP canary before it can batch,
+    # because three stills cannot canary a video model. 6.75s at 12fps is 81
+    # frames — the smallest request VACE will accept.
+    canary = runner.invoke(
+        app, ["canary", "restyle", str(run_path), "--runs-dir", str(runs_dir),
+              "--clip", "6.75"],
+    )
+    assert canary.exit_code == 0, canary.output
     (run_path / L.CANARY_VERDICT_NAME).write_text(json.dumps(
         {"schema_version": 1, "approved": True, "decider": "kwasi",
          "decided_at": "2026-09-09T12:00:00.000Z", "frames": {}}
     ))
-    assert runner.invoke(app, ["batch", str(run_path), "--runs-dir", str(runs_dir)]).exit_code == 0
+    batch = runner.invoke(app, ["batch", str(run_path), "--runs-dir", str(runs_dir)])
+    assert batch.exit_code == 0, batch.output
     assert runner.invoke(app, ["assemble", str(run_path), "--runs-dir", str(runs_dir)]).exit_code == 0
     return run_path
 
@@ -62,7 +71,7 @@ def test_snapshot_never_contains_a_local_path(finished_run: Path) -> None:
 def test_snapshot_reports_stage_and_progress(finished_run: Path) -> None:
     document = export(finished_run, finished_run.parent)
     assert document["stage"] == "assembled"
-    assert document["progress"] == {"extracted": 60, "restyled": 60, "percent": 100.0}
+    assert document["progress"] == {"extracted": 96, "restyled": 96, "percent": 100.0}
     assert document["artifacts"]["final_video"] is True
     assert document["config"]["backend"] == "dummy"
 

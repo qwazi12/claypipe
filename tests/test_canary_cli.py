@@ -31,12 +31,19 @@ def batched_run(tmp_path: Path, test_clip: Path) -> Path:
     )
     assert result.exit_code == 0, result.output
     run_path = Path(result.stdout.strip().splitlines()[-1])
+    # The v2v workflow: a resynth run needs a CLIP canary before it can batch,
+    # because three stills cannot canary a video model (T14/A3). 6.75s at 12fps
+    # is 81 frames, VACE's smallest accepted request.
+    canary = runner.invoke(
+        app, ["canary", "restyle", str(run_path), "--runs-dir", str(runs_dir),
+              "--clip", "6.75"],
+    )
+    assert canary.exit_code == 0, canary.output
     (run_path / L.CANARY_VERDICT_NAME).write_text(
         json.dumps({"schema_version": 1, "approved": True, "decider": "test", "frames": {}})
     )
-    assert runner.invoke(
-        app, ["batch", str(run_path), "--runs-dir", str(runs_dir)]
-    ).exit_code == 0
+    batch = runner.invoke(app, ["batch", str(run_path), "--runs-dir", str(runs_dir)])
+    assert batch.exit_code == 0, batch.output
     return run_path
 
 

@@ -17,12 +17,16 @@ os.environ["TRANSFORMERS_OFFLINE"] = "1"
 REPO_ROOT = Path(__file__).resolve().parent.parent
 TEST_CLIP = REPO_ROOT / "assets" / "test_clip.mp4"
 
-CLIP_SECONDS = 5
+# 8 seconds, not 5, because the architecture's smallest purchasable unit is
+# VACE's 81-frame minimum = 6.75s at 12fps. A 5-second clip is 60 frames and
+# cannot be canaried OR batched on a v2v backend at all, so a suite built on
+# one could never exercise the path it is meant to cover.
+CLIP_SECONDS = 8
 CLIP_SIZE = "1280x720"
 
 
 def _generate_test_clip(dst: Path) -> None:
-    """Synthetic 5s clip: testsrc video + sine audio (SPEC A1).
+    """Synthetic clip: testsrc video + sine audio (SPEC A1).
 
     Deterministic, tiny, and legally unencumbered — no bundled real footage.
     """

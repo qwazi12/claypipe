@@ -19,7 +19,8 @@ from .config import ConfigError, load_all
 from .pipeline import assemble as assemble_stage
 from .pipeline import qccard
 from .pipeline.extract import count_frames, extract_audio, extract_frames, frame_paths
-from .pipeline import burnin, captions, propagate, shots
+from .pipeline import burnin, captions, chunks, propagate, shots
+from .pipeline.shots import SEED_BASE
 from .pipeline.layout import LayoutError, source_aspect_of
 from .pipeline.restyle import (
     ChunkLengthError,
@@ -93,16 +94,13 @@ def intake(
              "operator saw the warning before spending.",
     ),
     mode: str = typer.Option(
-        # Still `surface` by DELIBERATE SEQUENCING, not by preference: resynth
-        # is the architecture, but its `batch` path lands with V5 (shot-aligned
-        # chunking). Defaulting to a mode that cannot complete a batch would
-        # leave the CLI broken for the common case between two commits. The
-        # flip happens in V5, alongside the path it needs.
-        LEGACY_MODE, "--mode",
-        help="Track: resynth (whole-frame video-to-video — THE ARCHITECTURE; "
-             "its batch path lands with V5) or surface (per-frame img2img, "
-             "RETIRED and kept for one release). Decides the target vector AND "
-             "the retry policy, so it is fixed at intake.",
+        # V5 landed the resynth batch path (shot-aligned chunking), so the
+        # default flips to the architecture now that it can complete a batch.
+        "resynth", "--mode",
+        help="Track: resynth (whole-frame video-to-video — THE ARCHITECTURE, "
+             "and the default) or surface (per-frame img2img, RETIRED and kept "
+             "for one release). Decides the target vector AND the retry "
+             "policy, so it is fixed at intake.",
     ),
     runs_dir: Optional[Path] = typer.Option(None, "--runs-dir", help="Override output directory"),
     ref: list[Path] = typer.Option(
@@ -343,6 +341,88 @@ def _effective_prompt(run: Run, profile) -> str:
     override = path.read_text().strip()
     run.logger.info("batch.prompt_override", source=source, chars=len(override))
     return override
+
+
+def _run_v2v(
+    run: Run, weights, profile, prompt: str, shot_plan, ledger, scorer,
+    references, *, live: bool, control_signal: str, resolution: str,
+) -> int:
+    """Whole-frame video-to-video restyle, chunked on shot cuts (V5).
+
+    ONE SEED FOR THE WHOLE RUN. Under v2v the seed drives the generated DESIGN,
+    so changing it between chunks redesigns the character at every seam — which
+    is the identity drift §6 names as a headline risk. This inverts T11's
+    per-shot seeding, which was right for per-frame img2img (where the seed
+    drives retry variety) and is wrong here.
+    """
+    sources = frame_paths(run.paths.source_frames)
+    try:
+        clip_backend = get_clip_backend(
+            run.manifest.backend, live=live,
+            control_signal=control_signal, resolution=resolution,
+        )
+    except (ValueError, Exception) as exc:
+        if isinstance(exc, (ValueError,)) or exc.__class__.__name__ == "VaceError":
+            _fail(str(exc))
+        raise
+
+    run_seed = SEED_BASE
+    chunk_plan = chunks.plan_chunks(
+        shot_plan=shot_plan,
+        seed=run_seed,
+        min_chunk_frames=clip_backend.min_chunk_frames,
+        max_chunk_frames=clip_backend.max_chunk_frames,
+    )
+    chunk_plan.write(run.paths.chunk_plan)
+
+    summary = chunk_plan.summary()
+    projected = sum(
+        weights.firewalls.cost.price_for(
+            getattr(clip_backend, "ledger_backend", clip_backend.name),
+            frames=c.frame_count,
+        )
+        for c in chunk_plan.chunks
+    )
+    run.logger.info("chunks.planned", **summary, projected_usd=round(projected, 4))
+    typer.echo(
+        f"chunking: {summary['chunks']} chunks, {summary['seams']} seams, "
+        f"{summary['mid_shot_seams']} mid-shot — ${projected:.4f}"
+    )
+    if chunk_plan.mid_shot_seams:
+        run.logger.warn(
+            "chunks.mid_shot_seams",
+            frames=[c.start_frame for c in chunk_plan.mid_shot_seams],
+            consequence=(
+                "two independently generated chunks meet inside a shot, so a "
+                "shift in the clay design shows as a jump in the character's "
+                "face rather than being hidden by a cut"
+            ),
+        )
+        typer.secho(
+            f"WARNING: {summary['mid_shot_seams']} seam(s) fall MID-SHOT at "
+            f"frames {summary['mid_shot_seam_frames']}. A design shift there is "
+            "visible; on a cut it is not.",
+            fg=typer.colors.YELLOW, err=True,
+        )
+
+    produced = 0
+    for chunk in chunk_plan.chunks:
+        window = sources[chunk.start_frame - 1 : chunk.end_frame]
+        written = restyle_clip_range(
+            backend=clip_backend, src_frames=window,
+            out_dir=run.paths.restyled_frames, prompt=prompt,
+            strength=profile.strength, seed=run_seed, logger=run.logger,
+            ledger=ledger, fps=run.manifest.fps,
+        )
+        produced += len(written)
+
+    run.logger.info(
+        "batch.v2v",
+        backend=clip_backend.name, frames=produced,
+        chunks=len(chunk_plan.chunks), seed=run_seed,
+        control_signal=control_signal, resolution=resolution,
+    )
+    return produced
 
 
 def _run_with_propagation(
@@ -711,6 +791,16 @@ def batch(
              "so warping frames forward buys nothing and costs fidelity. Kept "
              "for one release with the retired per-frame path.",
     ),
+    control_signal: str = typer.Option(
+        "depth", "--control-signal",
+        help="v2v control signal: depth (holds proportions tighter) or pose "
+             "(loosest, most figurine-like). fal's VACE offers no canny or "
+             "lineart mode — verified on the API schema.",
+    ),
+    resolution: str = typer.Option(
+        "480p", "--resolution",
+        help="v2v output resolution. Priced: 480p, 580p, 720p.",
+    ),
     drift_scoring: bool = typer.Option(
         False, "--drift-scoring",
         help="T18a: score propagated frames against their SOURCE frames even "
@@ -834,6 +924,22 @@ def batch(
         price_unit=weights.firewalls.cost.unit_for(run.manifest.backend),
     )
     scorer, controller, references = _build_scoring(run, weights, backend, extracted, profile)
+
+    # ---- V5: whole-frame video-to-video, the architecture ---------------
+    if run.manifest.mode != LEGACY_MODE and not propagate_keyframes:
+        try:
+            total = _run_v2v(
+                run, weights, profile, prompt, plan, ledger, scorer, references,
+                live=live, control_signal=control_signal, resolution=resolution,
+            )
+        except (chunks.ChunkPlanError, ChunkLengthError, RunHalted) as exc:
+            run.logger.error("batch.failed", error=str(exc))
+            _fail(str(exc))
+        typer.echo(
+            f"{total} frames restyled by whole-frame v2v — see "
+            f"{run.paths.chunk_plan.name}"
+        )
+        raise typer.Exit(0)
 
     # ---- RETIRED: adaptive keyframe propagation -------------------------
     if propagate_keyframes:
@@ -1039,6 +1145,12 @@ def _canary_frame_names(frames: list[Path], plan=None) -> tuple[list[Path], str]
 
 
 CANARY_CAPTION_STANDIN = "last frame (stand-in: no shot plan for this run)"
+
+# How many consecutive frames of an approved CLIP canary to lock as identity
+# references. Enough adjacent pairs to localise characters from motion, few
+# enough that the reference set stays a reference rather than a copy of the
+# canary.
+CLIP_REFERENCE_FRAMES = 6
 CANARY_CAPTION_PRESELECTED = "third slot, selected by `canary restyle`"
 
 
@@ -1472,7 +1584,17 @@ def _lock_canary_references(run: Run, verdict: dict) -> list[Path]:
             plan = shots.ShotPlan.read(run.paths.shot_plan)
         except Exception:
             plan = None
-    chosen, _caption = _canary_frame_names(frame_paths(run.paths.restyled_frames), plan)
+    restyled = frame_paths(run.paths.restyled_frames)
+    if run.manifest.canary_kind == "clip":
+        # A CLIP canary's frames are CONSECUTIVE, which is the case region
+        # references need: characters are localised from motion between
+        # adjacent frames, and the three-slot picker would hand back frames
+        # that are minutes apart. Locking a consecutive window is what makes
+        # region-scoped ID (R2 — every character, individually) engage at all.
+        chosen = restyled[: CLIP_REFERENCE_FRAMES]
+        _caption = f"clip canary, first {len(chosen)} consecutive frames"
+    else:
+        chosen, _caption = _canary_frame_names(restyled, plan)
 
     keep = [p for p in chosen if p.name not in rejected]
     if not keep:
