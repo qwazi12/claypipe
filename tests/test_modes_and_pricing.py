@@ -162,10 +162,35 @@ def test_the_three_units_are_all_representable(weights):
     assert "video_second" in units.values()
 
 
-def test_a_video_second_backend_prices_a_whole_clip(weights):
-    """MASTER_PLAN §3: Wan VACE 480p is $2.40 for a 60-second clip."""
-    cost = weights.firewalls.cost.price_for("wan_vace_480p", video_seconds=60)
-    assert cost == pytest.approx(2.40)
+def test_vace_bills_frame_count_over_sixteen_not_wall_clock(weights):
+    """V1, verified verbatim on fal 2026-09-16: "Video seconds are calculated
+    at 16 frames per second."
+
+    So a 60-second clip at our 12fps cadence is 720 frames and bills 720/16 =
+    45 seconds = $1.80 at 480p — NOT the $2.40 an earlier plan assumed from
+    wall-clock. That 2x error is what this unit exists to prevent.
+    """
+    cost = weights.firewalls.cost
+    assert cost.unit_for("wan_vace_480p") == "frames_div_16"
+    assert cost.price_for("wan_vace_480p", frames=720) == pytest.approx(1.80)
+    # And the smallest purchasable request, 81 frames.
+    assert cost.price_for("wan_vace_480p", frames=81) == pytest.approx(0.2025)
+    # A wall-clock duration is REFUSED rather than silently mispriced.
+    with pytest.raises(ConfigError, match="FRAME COUNT must be supplied"):
+        cost.price_for("wan_vace_480p", video_seconds=60)
+
+
+def test_the_two_video_units_stay_distinct(weights):
+    """Both units must exist so neither backend is approximated by the other.
+    The same 60s clip prices differently under each, by design."""
+    cost = weights.firewalls.cost
+    assert cost.unit_for("qwen_cloud_wan3_480p") == "video_second"
+    frames_based = cost.price_for("wan_vace_480p", frames=720)
+    wall_clock = cost.price_for("qwen_cloud_wan3_480p", video_seconds=60)
+    assert frames_based != wall_clock
+    # A frames-based backend refuses a duration and vice versa.
+    with pytest.raises(ConfigError, match="duration must be supplied"):
+        cost.price_for("qwen_cloud_wan3_480p", frames=720)
 
 
 def test_the_megapixel_round_up_trap_is_modelled(weights):
@@ -195,7 +220,7 @@ def test_pricing_a_unit_backend_without_its_dimension_is_refused():
 def test_per_call_refuses_a_non_per_image_backend(weights):
     """Answering would hand back a per-image figure for a per-video-second
     charge — a ledger that reconciles to the wrong number."""
-    with pytest.raises(ConfigError, match="bills per video_second"):
+    with pytest.raises(ConfigError, match="bills per frames_div_16"):
         weights.firewalls.cost.per_call("wan_vace_480p")
 
 
@@ -253,17 +278,18 @@ def test_ledger_records_the_unit_and_the_billed_dimension(test_clip: Path, tmp_p
     )
     ledger.authorize(
         frame="clip_0001-0081", backend="wan_vace_480p", stage="batch",
-        video_seconds=6.75,
+        frames=81,
     )
     records = [
         json.loads(line)
         for line in (run.paths.root / "spend_ledger.jsonl").read_text().splitlines()
     ]
     entry = records[0]
-    assert entry["unit"] == "video_second"
-    assert entry["video_seconds"] == pytest.approx(6.75)
-    assert entry["estimated_usd"] == pytest.approx(0.27)
-    assert ledger.run_total() == pytest.approx(0.27)
+    assert entry["unit"] == "frames_div_16"
+    assert entry["frames"] == 81
+    assert entry["billed_units"] == pytest.approx(81 / 16)
+    assert entry["estimated_usd"] == pytest.approx(0.2025)
+    assert ledger.run_total() == pytest.approx(0.2025)
 
 
 # ---------------------------------------------------------------------------

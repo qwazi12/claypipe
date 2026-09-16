@@ -273,9 +273,11 @@ def test_a_chunk_of_the_wrong_length_halts_the_run(tmp_path: Path):
         )
 
 
-def test_chunks_are_authorised_in_video_seconds(test_clip: Path, tmp_path: Path):
-    """T15: a Track C backend bills per video-second, so that is the unit the
-    ledger must authorise in — not per frame."""
+def test_chunks_are_authorised_in_frames_not_seconds(test_clip: Path, tmp_path: Path):
+    """V1: fal's Wan VACE bills FRAME COUNT / 16 — "video seconds are
+    calculated at 16 frames per second" — so frames is the unit the ledger must
+    authorise in. Authorising a wall-clock duration instead misprices every
+    call by the ratio between our 12fps cadence and 16, a 2x error."""
     from claypipe.pipeline.extract import extract_frames
     from claypipe.pipeline.retry import SpendLedger
 
@@ -303,8 +305,13 @@ def test_chunks_are_authorised_in_video_seconds(test_clip: Path, tmp_path: Path)
     ]
     assert records
     for record in records:
-        assert record["unit"] == "video_second"
-        assert record["video_seconds"] is not None
+        assert record["unit"] == "frames_div_16"
+        assert record["frames"] is not None
+        assert record["video_seconds"] is None, (
+            "a frames_div_16 backend must not be authorised against a duration"
+        )
+        # billed_units is frames/16, which is what reconciles against a bill.
+        assert record["billed_units"] == pytest.approx(record["frames"] / 16)
         assert record["frame"].startswith("clip_")
 
 

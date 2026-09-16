@@ -17,6 +17,7 @@ from typing import Protocol, runtime_checkable
 
 from PIL import Image, ImageEnhance, ImageFilter
 
+from ..config import BILLED_FRAMES_PER_SECOND
 from ..logging import RunLogger
 from .extract import frame_paths
 
@@ -223,8 +224,11 @@ def restyle_clip_range(
     backend that returns 80 frames for 81 would otherwise shorten the clip and
     desync the audio, and the resulting file would play perfectly.
 
-    Chunks are authorised against the ledger in VIDEO-SECONDS (T15), because
-    that is what a Track C backend actually bills.
+    Chunks are authorised against the ledger in FRAME COUNT (V1), because that
+    is what fal's Wan VACE actually bills: "Video seconds are calculated at 16
+    frames per second". Passing a wall-clock duration instead would misprice
+    every call by the ratio between our 12fps cadence and 16 — a 2x error the
+    price model now refuses outright rather than absorbing.
     """
     if not src_frames:
         raise FileNotFoundError("restyle_clip_range got no frames")
@@ -259,19 +263,21 @@ def restyle_clip_range(
             chunk_index += 1
             continue
 
-        video_seconds = len(chunk) / fps
         entry_id = None
         if ledger is not None:
             entry_id = ledger.authorize(
                 frame=f"clip_{chunk[0].stem}-{chunk[-1].stem}",
-                backend=backend.name, stage="batch", video_seconds=video_seconds,
+                backend=backend.name, stage="batch", frames=len(chunk),
             )
         produced = backend.restyle_clip(
             chunk, out_dir, prompt=prompt, strength=strength, seed=seed + chunk_index
         )
         if ledger is not None and entry_id is not None:
             ledger.reconcile(
-                entry_id, backend.cost_per_video_second_usd() * video_seconds
+                entry_id,
+                backend.cost_per_video_second_usd()
+                * len(chunk)
+                / BILLED_FRAMES_PER_SECOND,
             )
 
         if len(produced) != len(chunk):
@@ -284,7 +290,9 @@ def restyle_clip_range(
             )
         logger.info(
             "restyle.clip.chunk", chunk=chunk_index, frames=len(chunk),
-            video_seconds=round(video_seconds, 4), seed=seed + chunk_index,
+            billed_seconds=round(len(chunk) / BILLED_FRAMES_PER_SECOND, 4),
+            timeline_seconds=round(len(chunk) / fps, 4),
+            seed=seed + chunk_index,
             native_fps=backend.native_fps, pipeline_fps=fps,
         )
         written.extend(produced)
@@ -295,7 +303,10 @@ def restyle_clip_range(
         "restyle.clip",
         backend=backend.name, frames=len(written), chunks=chunk_index,
         est_cost_usd=round(
-            backend.cost_per_video_second_usd() * len(written) / fps, 4
+            backend.cost_per_video_second_usd()
+            * len(written)
+            / BILLED_FRAMES_PER_SECOND,
+            4,
         ),
     )
     return written

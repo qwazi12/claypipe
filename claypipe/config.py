@@ -240,7 +240,20 @@ class KillSwitchConfig(BaseModel):
     min_mean_f: float = Field(ge=0.0, le=1.0)
 
 
-PriceUnit = Literal["image", "megapixel", "video_second"]
+PriceUnit = Literal["image", "megapixel", "video_second", "frames_div_16"]
+
+# The divisor behind the `frames_div_16` unit.
+#
+# VERIFIED VERBATIM on fal's Wan VACE 14B model page and its llms.txt, both on
+# 2026-09-16: "Video seconds are calculated at 16 frames per second."
+#
+# This is NOT wall-clock duration, and the difference is a 2x cost swing on
+# every run. A 60-second clip at our 12fps cadence is 720 frames, which bills
+# as 720/16 = 45 video-seconds ($1.80 at 480p) — not as 60 wall-clock seconds
+# ($2.40). Guessing this wrong in either direction breaks the spend caps: too
+# low and they stop binding, too high and the affordability ceiling refuses
+# every real call.
+BILLED_FRAMES_PER_SECOND = 16
 
 
 class PriceModel(BaseModel):
@@ -248,8 +261,18 @@ class PriceModel(BaseModel):
 
     A flat per-call number silently mis-prices two thirds of the candidate
     backends. fal Kontext [dev] bills per megapixel; Wan VACE bills per
-    video-second. Pricing either as "per call" produces a ledger that
-    reconciles to the wrong figure and spend caps that do not bind.
+    FRAME COUNT divided by 16. Pricing either as "per call" produces a ledger
+    that reconciles to the wrong figure and spend caps that do not bind.
+
+    THE TWO VIDEO UNITS ARE NOT INTERCHANGEABLE, and conflating them is a 2x
+    error:
+      `video_second`  — wall-clock duration of the output. What Qwen Cloud's
+                        Wan 3.0 bills ($0.035/sec at 480p).
+      `frames_div_16` — frame count / 16, regardless of the fps the output is
+                        played at. What fal's Wan VACE and Wan Animate bill.
+    At our 12fps cadence a 60s clip is 720 frames: 45 billed seconds under
+    frames_div_16, 60 under video_second. Both units exist here so neither
+    backend has to be approximated by the other.
 
     `round_up_to_mp` is not a rounding preference — it is fal's actual billing
     rule, and it inverts an optimisation: fal rounds UP to the next whole
@@ -276,7 +299,13 @@ class PriceModel(BaseModel):
             )
         return self
 
-    def cost(self, *, megapixels: float | None = None, video_seconds: float | None = None) -> float:
+    def cost(
+        self,
+        *,
+        megapixels: float | None = None,
+        video_seconds: float | None = None,
+        frames: int | None = None,
+    ) -> float:
         """Price one call. The required dimension is NOT optional: asking for a
         per-video-second price without a duration is a bug, and defaulting it
         to 1 would under-report spend by whatever the real duration was."""
@@ -290,12 +319,45 @@ class PriceModel(BaseModel):
                 )
             billable = math.ceil(megapixels) if self.round_up_to_mp else megapixels
             return self.rate * billable
+        if self.unit == "frames_div_16":
+            if frames is None:
+                raise ConfigError(
+                    "this backend bills per frame-count/"
+                    f"{BILLED_FRAMES_PER_SECOND}; the FRAME COUNT must be "
+                    "supplied, not a duration. Passing a wall-clock duration "
+                    "here would misprice the call by the ratio between the "
+                    "output fps and "
+                    f"{BILLED_FRAMES_PER_SECOND} — a 2x error at 12fps."
+                )
+            return self.rate * frames / BILLED_FRAMES_PER_SECOND
         if video_seconds is None:
             raise ConfigError(
                 "this backend bills per video-second; the clip duration must be "
                 "supplied. Refusing to price a call against an assumed duration."
             )
         return self.rate * video_seconds
+
+    def billed_units(
+        self,
+        *,
+        megapixels: float | None = None,
+        video_seconds: float | None = None,
+        frames: int | None = None,
+    ) -> float:
+        """How many billable units this call consumes, for the ledger record.
+
+        Recorded alongside the dollar figure so a bill can be reconciled: an
+        entry saying only "$1.80" cannot distinguish 45 billed seconds at
+        $0.04 from 22.5 at $0.08."""
+        if self.unit == "image":
+            return 1.0
+        if self.unit == "megapixel":
+            if megapixels is None:
+                return 0.0
+            return float(math.ceil(megapixels) if self.round_up_to_mp else megapixels)
+        if self.unit == "frames_div_16":
+            return 0.0 if frames is None else frames / BILLED_FRAMES_PER_SECOND
+        return 0.0 if video_seconds is None else float(video_seconds)
 
 
 class CostConfig(BaseModel):
@@ -369,6 +431,7 @@ class CostConfig(BaseModel):
         *,
         megapixels: float | None = None,
         video_seconds: float | None = None,
+        frames: int | None = None,
     ) -> float:
         """Unit-aware price for one call. The path a non-per-image backend takes."""
         model = self.pricing.get(backend)
@@ -376,7 +439,24 @@ class CostConfig(BaseModel):
             # No unit declared: fall back to the per-image shorthand, which
             # still refuses an entirely unpriced backend.
             return self.per_call(backend)
-        return model.cost(megapixels=megapixels, video_seconds=video_seconds)
+        return model.cost(
+            megapixels=megapixels, video_seconds=video_seconds, frames=frames
+        )
+
+    def billed_units_for(
+        self,
+        backend: str,
+        *,
+        megapixels: float | None = None,
+        video_seconds: float | None = None,
+        frames: int | None = None,
+    ) -> float:
+        model = self.pricing.get(backend)
+        if model is None:
+            return 1.0
+        return model.billed_units(
+            megapixels=megapixels, video_seconds=video_seconds, frames=frames
+        )
 
     def unit_for(self, backend: str) -> PriceUnit:
         model = self.pricing.get(backend)

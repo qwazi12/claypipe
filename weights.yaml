@@ -160,7 +160,10 @@ firewalls:
       # backend is refused outright, so an unlisted dummy_clip would make the
       # entire Track C path untestable.
       dummy_clip:
-        unit: video_second
+        # Mirrors VACE's unit, not just its price. A stand-in that billed
+        # wall-clock while the real backend bills frames/16 would exercise the
+        # wrong ledger path and hide the 2x error in tests.
+        unit: frames_div_16
         rate: 0.0
       # --- T16 CANDIDATES, ALL PRICES VERIFIED ON fal's MODEL PAGES 2026-09-15.
       # Each entry names the endpoint it was read from, so a future session can
@@ -200,19 +203,33 @@ firewalls:
         rate: 0.075
         round_up_to_mp: true
 
-      # fal-ai/wan-vace-14b -- "$0.04 per video second for 480p", and "Video
-      # seconds are calculated at 16 frames per second". num_frames "must be
-      # between 81 to 241 (inclusive), default 81" -- so the purchasable floor
-      # is 81/16 = 5.0625s = $0.2025. CONFIRMED from the API schema.
+      # fal-ai/wan-vace-14b -- THE v2v BACKEND. Verified 2026-09-16 on the
+      # model page AND its llms.txt, both stating verbatim: "Video seconds are
+      # calculated at 16 frames per second."
+      #
+      # So the unit is frames_div_16, NOT wall-clock video_second. That
+      # distinction is a 2x cost swing: a 60s clip at our 12fps cadence is 720
+      # frames, billing 720/16 = 45 seconds ($1.80 at 480p) rather than 60
+      # ($2.40). num_frames is constrained to 81-241 inclusive, so the smallest
+      # purchasable request is 81 frames = 5.0625 billed seconds = $0.2025.
       wan_vace_480p:
-        unit: video_second
+        unit: frames_div_16
         rate: 0.04
       wan_vace_580p:
-        unit: video_second
+        unit: frames_div_16
         rate: 0.06
       wan_vace_720p:
-        unit: video_second
+        unit: frames_div_16
         rate: 0.08
+
+      # Kept as a WALL-CLOCK example so the two video units stay visibly
+      # distinct and neither backend has to be approximated by the other.
+      # Qwen Cloud Wan 3.0: $0.035 per wall-clock second at 480p, 30s max per
+      # generation. NOT evaluated; priced so it is refusable rather than
+      # unpriced if a future session reaches for it.
+      qwen_cloud_wan3_480p:
+        unit: video_second
+        rate: 0.035
 
       # Deferred for T16: a 5.06s canary is $0.91, more than everything else
       # combined. Priced here so it is refusable rather than unpriced.

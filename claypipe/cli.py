@@ -1097,11 +1097,14 @@ def _canary_restyle_clip(
     # discovered on the invoice.
     if len(chunk) < clip_backend.min_chunk_frames:
         floor_seconds = clip_backend.min_chunk_frames / clip_backend.native_fps
+        # Priced in FRAMES (V1): VACE bills frame-count/16, so pricing the
+        # floor as a wall-clock duration would quote the wrong figure in the
+        # very warning that exists to stop the operator overpaying.
         billed = weights.firewalls.cost.price_for(
-            clip_backend.name, video_seconds=floor_seconds
+            clip_backend.name, frames=clip_backend.min_chunk_frames
         )
         asked = weights.firewalls.cost.price_for(
-            clip_backend.name, video_seconds=len(chunk) / fps
+            clip_backend.name, frames=len(chunk)
         )
         run.logger.warn(
             "canary.restyle.below_min_chunk",

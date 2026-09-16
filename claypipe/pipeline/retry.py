@@ -200,6 +200,7 @@ class SpendLedger:
         stage: str,
         megapixels: float | None = None,
         video_seconds: float | None = None,
+        frames: int | None = None,
     ) -> str:
         """Check both caps, then record the intent to spend. Returns entry id.
 
@@ -213,9 +214,14 @@ class SpendLedger:
         real size or duration was and leave the caps not binding.
         """
         estimate = self.cfg.cost.price_for(
-            backend, megapixels=megapixels, video_seconds=video_seconds
+            backend, megapixels=megapixels, video_seconds=video_seconds,
+            frames=frames,
         )
         unit = self.cfg.cost.unit_for(backend)
+        billed_units = self.cfg.cost.billed_units_for(
+            backend, megapixels=megapixels, video_seconds=video_seconds,
+            frames=frames,
+        )
         projected_run = round(self.run_total() + estimate, 6)
         projected_project = round(self.project_total() + estimate, 6)
 
@@ -268,6 +274,11 @@ class SpendLedger:
             "unit": unit,
             "megapixels": megapixels,
             "video_seconds": video_seconds,
+            "frames": frames,
+            # How many billable units this call consumed. An entry saying only
+            # "$1.80" cannot distinguish 45 billed seconds at $0.04 from 22.5
+            # at $0.08, which is exactly what reconciling a bill requires.
+            "billed_units": round(billed_units, 6),
         }
         self._entries[entry_id] = record
         self._append(self.run_ledger, record)
@@ -277,6 +288,7 @@ class SpendLedger:
                 "spend.authorized", entry_id=entry_id, frame=frame, stage=stage,
                 estimated_usd=estimate, run_total_usd=projected_run,
                 unit=unit, megapixels=megapixels, video_seconds=video_seconds,
+                frames=frames, billed_units=round(billed_units, 6),
             )
         return entry_id
 

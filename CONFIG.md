@@ -228,9 +228,10 @@ session can re-check one line instead of re-researching the table.
 | `fal_kontext_dev` | `fal-ai/flux-kontext/dev` | megapixel | 0.025 | **yes, confirmed wording** |
 | `fal_qwen_image_edit` | `fal-ai/qwen-image-edit` | megapixel | 0.030 | assumed (page silent) |
 | `fal_flux_general` | `fal-ai/flux-general/image-to-image` | megapixel | 0.075 | **yes, confirmed** |
-| `wan_vace_480p` | `fal-ai/wan-vace-14b` | video_second | 0.04 | — |
-| `wan_vace_580p` | `fal-ai/wan-vace-14b` | video_second | 0.06 | — |
-| `wan_vace_720p` | `fal-ai/wan-vace-14b` | video_second | 0.08 | — |
+| `wan_vace_480p` | `fal-ai/wan-vace-14b` | **frames_div_16** | 0.04 | — |
+| `wan_vace_580p` | `fal-ai/wan-vace-14b` | **frames_div_16** | 0.06 | — |
+| `wan_vace_720p` | `fal-ai/wan-vace-14b` | **frames_div_16** | 0.08 | — |
+| `qwen_cloud_wan3_480p` | Qwen Cloud Wan 3.0 | video_second | 0.035 | — |
 | `runway_aleph` | (deferred) | video_second | 0.18 | — |
 
 `fal_flux_general` is the only fal endpoint accepting BOTH `controlnets` and
@@ -241,6 +242,36 @@ structure-conditioning together with a claymation LoRA. It is 3x Kontext
 Wan VACE's `num_frames` is constrained to **81-241 inclusive** at 16fps native,
 so the smallest purchasable request is 81/16 = **5.0625 video-seconds =
 $0.2025**. `DummyClipBackend` mirrors those bounds deliberately.
+
+### The two video units are not interchangeable
+
+`video_second` is wall-clock duration of the output. `frames_div_16` is frame
+count divided by 16, regardless of the fps the output is played at.
+
+Verified verbatim on fal's Wan VACE 14B model page and its `llms.txt`
+(2026-09-16): **"Video seconds are calculated at 16 frames per second."** So
+VACE — and fal's Wan Animate endpoints — bill `frames_div_16`, while Qwen
+Cloud's Wan 3.0 bills wall-clock `video_second`.
+
+**Conflating them is a 2x error.** A 60-second clip at ClayPipe's 12fps cadence
+is 720 frames:
+
+| Unit | Billed | Cost at $0.04 |
+|---|---|---|
+| `frames_div_16` (what VACE uses) | 720/16 = 45 s | **$1.80** |
+| `video_second` (wall clock) | 60 s | $2.40 |
+
+At 24fps the same minute would be 1440 frames = 90 billed seconds = $3.60, so
+the cadence choice moves the bill even though wall-clock duration does not.
+Both units exist so neither backend has to be approximated by the other, and
+each **refuses** the other's dimension rather than silently mispricing:
+passing `video_seconds` to a `frames_div_16` backend raises, and vice versa.
+
+`BILLED_FRAMES_PER_SECOND = 16` lives in `config.py` with that quote attached.
+
+`dummy_clip` deliberately mirrors VACE's *unit*, not just its price — a
+stand-in billing wall-clock while the real backend bills frames/16 would
+exercise the wrong ledger path and hide the error in tests.
 
 **A billing unit fal uses that this model does NOT support:** some endpoints
 (e.g. `fal-ai/fast-sdxl-controlnet-canny/image-to-image`) are priced **per
