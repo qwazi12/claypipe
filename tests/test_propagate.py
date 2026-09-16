@@ -407,8 +407,9 @@ def test_warp_preserves_shape_and_channels(temporal):
 # ---------------------------------------------------------------------------
 
 def test_batch_propagate_refuses_a_resynth_run(test_clip: Path, tmp_path: Path):
-    """A clip backend already works on ranges and produces its own temporal
-    coherence; warping its output would fight the thing it was bought for."""
+    """V3: propagation belongs to the retired per-frame path. A clip backend
+    already produces its own temporal coherence, and a video model bills the
+    same whether or not frames were warped."""
     from typer.testing import CliRunner
 
     from claypipe.cli import app
@@ -430,7 +431,7 @@ def test_batch_propagate_refuses_a_resynth_run(test_clip: Path, tmp_path: Path):
               "--propagate"],
     )
     assert result.exit_code != 0
-    assert "Track A only" in result.output
+    assert "retired" in result.output.lower()
 
 
 def test_batch_propagate_produces_every_frame_and_states_the_saving(
@@ -755,30 +756,31 @@ def test_max_chain_default_is_unchanged_by_t18a():
     assert DEFAULT_MAX_CHAIN == 12
 
 
-def test_propagate_warns_when_the_source_has_burned_in_text(test_clip: Path, tmp_path: Path):
-    """MEASURED on a real 59s sample: propagation carries burned-in text
-    forward from each keyframe, so the restyled panel shows captions from the
-    wrong moment — 61.1% of propagated frames on the Young Sheldon clip.
+# ---------------------------------------------------------------------------
+# V3 — propagation is RETIRED.
+#
+# It saved money only on a PER-FRAME backend. A video model bills per frame or
+# per second whether or not the frames were warped, so warping buys nothing and
+# costs fidelity. Kept behind the retired per-frame path for one release.
+#
+# Retiring it also DELETES the caption-ghosting defect outright rather than
+# mitigating it: with no warped frames, no frame can inherit a stale caption
+# from its keyframe. The warning and both its tests are gone, not skipped.
+# ---------------------------------------------------------------------------
 
-    Neither metric catches it. TF is circular on a warped frame, and T18a's
-    whole-frame SSIM averages the defect away because the caption band is only
-    ~7% of the frame area. So the operator has to be told.
-    """
+def test_propagate_is_refused_on_the_v2v_path(test_clip: Path, tmp_path: Path):
     from typer.testing import CliRunner
 
     from claypipe.cli import app
     from claypipe.run import Run
 
     run = Run.create(
-        source=test_clip, style="clay", fps=12, backend="dummy", mode="surface",
-        clip_title="Ghosting", duration_s=5.0,
+        source=test_clip, style="clay", fps=12, backend="dummy", mode="resynth",
+        clip_title="Retired", duration_s=5.0,
         source_width=1280, source_height=720,
         styles=load_styles(), runs_dir=tmp_path / "runs", echo=False,
     )
-    run.manifest.burned_in_text = {
-        "detected": True, "kind": "captions", "band_top": 297,
-        "band_bottom": 342, "frame_height": 640,
-    }
+    run.manifest.canary_kind = "clip"
     run.save()
     (run.paths.root / "canary_verdict.json").write_text(
         json.dumps({"schema_version": 1, "approved": True, "decider": "test"})
@@ -787,19 +789,12 @@ def test_propagate_warns_when_the_source_has_burned_in_text(test_clip: Path, tmp
         app, ["batch", str(run.paths.root), "--runs-dir", str(tmp_path / "runs"),
               "--propagate"],
     )
-    assert result.exit_code == 0, result.output
-
-    logged = [json.loads(line) for line in run.paths.log.read_text().splitlines()]
-    warning = next(e for e in logged if e["event"] == "batch.propagate.burned_in_text")
-    assert warning["level"] == "WARN"
-    assert "wrong moment" in warning["consequence"]
-    # It must name why the existing metrics do not cover it, or the operator
-    # will assume the drift score already checked.
-    assert "circular" in warning["consequence"]
-    assert "--propagate" in warning["fix"]
+    assert result.exit_code != 0
+    assert "retired" in result.output.lower()
+    assert "whether or not the frames were warped" in result.output
 
 
-def test_propagate_is_silent_when_the_source_is_clean(test_clip: Path, tmp_path: Path):
+def test_propagate_warns_when_used_on_the_retired_path(test_clip: Path, tmp_path: Path):
     from typer.testing import CliRunner
 
     from claypipe.cli import app
@@ -807,18 +802,92 @@ def test_propagate_is_silent_when_the_source_is_clean(test_clip: Path, tmp_path:
 
     run = Run.create(
         source=test_clip, style="clay", fps=12, backend="dummy", mode="surface",
-        clip_title="Clean", duration_s=5.0,
+        clip_title="Legacy", duration_s=5.0,
         source_width=1280, source_height=720,
         styles=load_styles(), runs_dir=tmp_path / "runs", echo=False,
     )
-    run.manifest.burned_in_text = {"detected": False, "kind": "none"}
-    run.save()
     (run.paths.root / "canary_verdict.json").write_text(
         json.dumps({"schema_version": 1, "approved": True, "decider": "test"})
     )
-    CliRunner().invoke(
+    result = CliRunner().invoke(
         app, ["batch", str(run.paths.root), "--runs-dir", str(tmp_path / "runs"),
               "--propagate"],
     )
+    assert result.exit_code == 0, result.output
     logged = [json.loads(line) for line in run.paths.log.read_text().splitlines()]
-    assert not any(e["event"] == "batch.propagate.burned_in_text" for e in logged)
+    warning = next(e for e in logged if e["event"] == "batch.propagate.retired")
+    assert warning["level"] == "WARN"
+    assert "removal" in warning
+
+
+def test_the_ghosting_warning_is_gone_not_skipped():
+    """Retiring propagation deletes the defect rather than mitigating it: with
+    no warped frames, nothing can inherit a stale caption from a keyframe."""
+    from claypipe import cli
+
+    source = Path(cli.__file__).read_text()
+    assert "batch.propagate.burned_in_text" not in source
+    # T9b's own detection and reporting must SURVIVE — only the propagation
+    # interaction is gone.
+    assert "intake.burned_in_text" in source
+
+
+def test_the_default_mode_can_actually_complete_a_batch(test_clip: Path, tmp_path: Path):
+    """Whatever the default is, it must have a working batch path.
+
+    resynth is the architecture, but its batch path lands with V5, so the
+    default stays `surface` until then — defaulting to a mode that cannot
+    complete a batch would leave the CLI broken for the common case between two
+    commits. This test is what makes that a decision rather than an oversight:
+    it fails if the default is flipped before the path exists.
+    """
+    from typer.testing import CliRunner
+
+    from claypipe.cli import app
+    from claypipe.run import Run
+
+    runs = tmp_path / "runs"
+    result = CliRunner().invoke(
+        app, ["intake", str(test_clip), "--style", "clay", "--title", "Default",
+              "--runs-dir", str(runs)],
+    )
+    assert result.exit_code == 0, result.output
+    run = Run.load(Path(result.output.strip().splitlines()[-1]), echo=False)
+
+    if run.manifest.mode == "resynth":
+        (run.paths.root / "canary_verdict.json").write_text(
+            json.dumps({"schema_version": 1, "approved": True, "decider": "test"})
+        )
+        canary = CliRunner().invoke(
+            app, ["canary", "restyle", str(run.paths.root),
+                  "--runs-dir", str(runs), "--clip", "6.75"],
+        )
+        assert canary.exit_code == 0, canary.output
+    else:
+        (run.paths.root / "canary_verdict.json").write_text(
+            json.dumps({"schema_version": 1, "approved": True, "decider": "test"})
+        )
+
+    batch = CliRunner().invoke(
+        app, ["batch", str(run.paths.root), "--runs-dir", str(runs)]
+    )
+    assert batch.exit_code == 0, (
+        f"the default mode {run.manifest.mode!r} cannot complete a batch:\n"
+        f"{batch.output}"
+    )
+
+
+def test_choosing_the_retired_mode_still_works_but_says_so(test_clip: Path, tmp_path: Path):
+    """Kept for one release — usable, and loudly labelled."""
+    from typer.testing import CliRunner
+
+    from claypipe.cli import app
+    from claypipe.run import Run
+
+    result = CliRunner().invoke(
+        app, ["intake", str(test_clip), "--style", "clay", "--title", "Legacy",
+              "--mode", "surface", "--runs-dir", str(tmp_path / "runs")],
+    )
+    assert result.exit_code == 0, result.output
+    run = Run.load(Path(result.output.strip().splitlines()[-1]), echo=False)
+    assert run.manifest.mode == "surface"

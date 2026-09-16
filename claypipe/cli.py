@@ -63,6 +63,14 @@ def _fail(message: str) -> None:
     raise typer.Exit(1)
 
 
+# The per-frame img2img track, retired by the v2v architecture and kept behind
+# this name for one release. It cannot satisfy the format's requirements: a
+# per-frame restyle at a strength high enough to read as clay drifts geometry
+# shot to shot, and nothing in it restyles the ENVIRONMENT as clay — which is
+# the difference between a clay world and a clay figure standing in a real
+# room. Whole-frame v2v does both in one pass.
+LEGACY_MODE = "surface"
+
 @app.command()
 def version() -> None:
     """Print the ClayPipe version and the ffmpeg it will use."""
@@ -85,10 +93,16 @@ def intake(
              "operator saw the warning before spending.",
     ),
     mode: str = typer.Option(
-        "surface", "--mode",
-        help="Track: surface (per-frame img2img, geometry preserved) or "
-             "resynth (video-native, geometry moves). Decides the target "
-             "vector AND the retry policy, so it is fixed at intake.",
+        # Still `surface` by DELIBERATE SEQUENCING, not by preference: resynth
+        # is the architecture, but its `batch` path lands with V5 (shot-aligned
+        # chunking). Defaulting to a mode that cannot complete a batch would
+        # leave the CLI broken for the common case between two commits. The
+        # flip happens in V5, alongside the path it needs.
+        LEGACY_MODE, "--mode",
+        help="Track: resynth (whole-frame video-to-video — THE ARCHITECTURE; "
+             "its batch path lands with V5) or surface (per-frame img2img, "
+             "RETIRED and kept for one release). Decides the target vector AND "
+             "the retry policy, so it is fixed at intake.",
     ),
     runs_dir: Optional[Path] = typer.Option(None, "--runs-dir", help="Override output directory"),
     ref: list[Path] = typer.Option(
@@ -109,6 +123,14 @@ def intake(
         mode_cfg = weights.mode(mode)
     except ConfigError as exc:
         _fail(str(exc))
+    if mode == LEGACY_MODE:
+        typer.secho(
+            f"WARNING: --mode {LEGACY_MODE} is RETIRED. The architecture is "
+            "whole-frame video-to-video (--mode resynth), which is the only "
+            "path that restyles every character AND the environment together. "
+            "Per-frame img2img is kept for one release and will be removed.",
+            fg=typer.colors.YELLOW, err=True,
+        )
 
     try:
         duration = ffmpeg.duration_seconds(video)
@@ -673,10 +695,10 @@ def batch(
     ),
     propagate_keyframes: bool = typer.Option(
         False, "--propagate",
-        help="T18: restyle one frame per shot and WARP the rest forward along "
-             "optical flow, instead of paying for every frame. Measured 12.2x "
-             "fewer paid frames on a 60s reference clip. Track A only — a clip "
-             "backend already works on ranges.",
+        help="RETIRED. Keyframe propagation saved money only on a PER-FRAME "
+             "backend; a video model bills per frame or per second regardless, "
+             "so warping frames forward buys nothing and costs fidelity. Kept "
+             "for one release with the retired per-frame path.",
     ),
     drift_scoring: bool = typer.Option(
         False, "--drift-scoring",
@@ -802,62 +824,27 @@ def batch(
     )
     scorer, controller, references = _build_scoring(run, weights, backend, extracted, profile)
 
-    # ---- T18: adaptive keyframe propagation -----------------------------
+    # ---- RETIRED: adaptive keyframe propagation -------------------------
     if propagate_keyframes:
-        # MEASURED CONSEQUENCE of combining T9b with T18, found by looking at a
-        # rendered 59s sample: on a source with burned-in text, propagation
-        # makes the restyled panel show captions FROM THE WRONG MOMENT. A
-        # keyframe captures whatever caption was on screen, and every frame
-        # warped from it carries that text forward after the source caption has
-        # changed or gone. Measured on the Young Sheldon clip: 61.1% of
-        # propagated frames had a caption band differing from their source by
-        # more than 1% ink coverage, with the worst cases showing 10-12% ink
-        # where the source had none.
-        #
-        # It is NOT drift-with-depth — the mean mismatch is flat across chain
-        # depth (0.023 at depth 0-3, 0.018 at 12-15) because the error is
-        # inherited whole from the keyframe at the first warp, not accumulated.
-        #
-        # And NEITHER metric catches it: TF is circular on a warped frame, and
-        # T18a's whole-frame SSIM averages the defect away because the caption
-        # band is only ~7% of the frame area (measured frame 94: 0.115 inside
-        # the band, 0.288 whole-frame).
-        burn = run.manifest.burned_in_text or {}
-        if burn.get("detected"):
-            run.logger.warn(
-                "batch.propagate.burned_in_text",
-                kind=burn.get("kind"),
-                band_top=burn.get("band_top"),
-                band_bottom=burn.get("band_bottom"),
-                consequence=(
-                    "propagation will carry burned-in text forward from each "
-                    "keyframe, so the restyled panel shows captions from the "
-                    "wrong moment. Measured at 61% of propagated frames on a "
-                    "comparable clip. Neither TF nor the T18a drift score "
-                    "detects it: TF is circular on a warped frame, and "
-                    "whole-frame SSIM averages away a defect confined to ~7% "
-                    "of the frame."
-                ),
-                fix="drop --propagate on this source, or accept the ghosting",
-            )
-            typer.secho(
-                "WARNING: this source has burned-in "
-                f"{burn.get('kind', 'text')} AND --propagate is on. Warped "
-                "frames inherit their keyframe's text, so the restyled panel "
-                "will show captions from the wrong moment (~61% of propagated "
-                "frames on a comparable clip).\n"
-                "  -> neither TF nor the drift score catches this: TF is "
-                "circular on a warped frame, and the caption band is only ~7% "
-                "of the frame so whole-frame SSIM averages it away.\n"
-                "  -> drop --propagate on this source, or accept the ghosting.",
-                fg=typer.colors.YELLOW, err=True,
-            )
-        if run.manifest.mode == "resynth":
+        if run.manifest.mode != LEGACY_MODE:
             _fail(
-                "--propagate is Track A only. A clip backend already works on "
-                "ranges and produces its own temporal coherence; warping its "
-                "output would fight the thing it was bought for."
+                f"--propagate belongs to the retired {LEGACY_MODE!r} path. A "
+                "video model bills per frame or per second whether or not the "
+                "frames were warped, so propagation saves nothing here and "
+                "costs fidelity — and a clip backend already produces its own "
+                "temporal coherence, which warping would fight."
             )
+        run.logger.warn(
+            "batch.propagate.retired",
+            reason="propagation saved money only on a per-frame backend; a "
+                   "video model bills per frame or per second regardless",
+            removal="scheduled for the release after next",
+        )
+        typer.secho(
+            "WARNING: --propagate is RETIRED and will be removed. It saved "
+            "money only on a per-frame backend.",
+            fg=typer.colors.YELLOW, err=True,
+        )
         try:
             total = _run_with_propagation(
                 run, weights, backend, profile, prompt, plan, ledger,
