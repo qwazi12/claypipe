@@ -408,9 +408,17 @@ def restyle_frames(
             # A shot-opening frame has no comparable predecessor. See the
             # boundary_frames note above — this is the D15/D34 fix.
             predecessor = None if idx in boundaries else previous_accepted
+            # V4: FLOW compares the OUTPUT's flow field against the SOURCE's,
+            # so the source's predecessor is required too — and it is withheld
+            # at a shot boundary for the same reason the restyled one is, since
+            # flow across a cut measures nothing.
+            source_predecessor = (
+                None if idx in boundaries or idx == 1 else frames[idx - 2]
+            )
             score = _score_and_record(
                 scorer=scorer, frame=src.name, source=src, restyled=dst,
                 references=references or [], previous=predecessor,
+                previous_source=source_predecessor,
                 scores_path=scores_path, shot_boundary=idx in boundaries,
             )
             controller.observe(score)
@@ -456,7 +464,9 @@ def restyle_frames(
 def _score_and_record(
     *, scorer, frame: str, source: Path, restyled: Path,
     references: list, previous: Path | None, scores_path: Path | None,
+    previous_source: Path | None = None,
     shot_boundary: bool = False,
+    targets=None,
 ):
     """Score one frame and append it to scores.jsonl (SPEC §3)."""
     from .score import load_image
@@ -467,6 +477,10 @@ def _score_and_record(
         restyled=load_image(restyled),
         references=references,
         previous_restyled=load_image(previous) if previous is not None else None,
+        previous_source=(
+            load_image(previous_source) if previous_source is not None else None
+        ),
+        targets=targets,
     )
     if scores_path is not None:
         scores_path.parent.mkdir(parents=True, exist_ok=True)

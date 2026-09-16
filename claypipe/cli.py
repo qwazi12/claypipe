@@ -571,6 +571,13 @@ def _build_scoring(run: Run, weights, backend, frame_count: int, profile):
     try:
         scorer = Scorer.build(weights)
         loaded = [load_image(p) for p in references]
+        # V4: region crops, when the approved canary produced any. Missing is
+        # normal (a three-frame canary has no consecutive pair) and makes ID
+        # fall back to whole-frame with the support recorded on every score.
+        region_paths = [Path(p) for p in run.manifest.reference_regions]
+        scorer.region_references = [
+            load_image(p) for p in region_paths if p.is_file()
+        ]
     except ScoringError as exc:
         _fail(str(exc))
 
@@ -581,6 +588,10 @@ def _build_scoring(run: Run, weights, backend, frame_count: int, profile):
     run.logger.info(
         "batch.scoring.enabled",
         backend=backend.name, references=len(loaded),
+        region_references=len(scorer.region_references),
+        id_support=(
+            "regions" if scorer.region_references else "whole_frame"
+        ),
         retry_budget=controller.retry_budget,
     )
     return scorer, controller, loaded
@@ -1486,6 +1497,9 @@ def _lock_canary_references(run: Run, verdict: dict) -> list[Path]:
 
     run.manifest.reference_images = [str(p.resolve()) for p in locked]
     run.manifest.reference_origin = "canary"
+    run.manifest.reference_regions = [
+        str(p.resolve()) for p in _lock_region_references(run, keep)
+    ]
     run.save()
     run.logger.info(
         "canary.references.locked",
@@ -1495,6 +1509,80 @@ def _lock_canary_references(run: Run, verdict: dict) -> list[Path]:
         refs=[p.name for p in locked],
     )
     return locked
+
+
+def _lock_region_references(run: Run, approved: list[Path]) -> list[Path]:
+    """Crop character regions out of the approved canary frames (V4).
+
+    ID under whole-frame v2v asks "is this the same clay CHARACTER", and a
+    whole-frame measurement cannot answer it: the environment is being rebuilt
+    in clay too, so it dominates the embedding and a wrong character still
+    scores well. Scoring a region requires something region-shaped to compare
+    against, and it has to come from the same approved output — a crop measured
+    against a whole-frame reference asks CLIP whether a person resembles a
+    scene.
+
+    Regions come from motion between CONSECUTIVE approved frames. When the
+    approved frames are not consecutive (the three-slot frame canary picks
+    first/middle/most-motion) there is no motion pair, so none are locked and
+    ID honestly falls back to whole-frame. A clip canary, which IS consecutive,
+    is the case this exists for.
+    """
+    try:
+        from .pipeline.score import character_regions, load_image
+    except ImportError as exc:
+        run.logger.warn("canary.region_refs.unavailable", error=str(exc))
+        return []
+
+    from PIL import Image
+
+    _styles, weights, _ = _startup()
+    ordered = sorted(approved, key=lambda p: p.name)
+    pairs = [
+        (a, b) for a, b in zip(ordered, ordered[1:])
+        if _frame_index(b) - _frame_index(a) == 1
+    ]
+    if not pairs:
+        run.logger.info(
+            "canary.region_refs.skipped",
+            reason="approved canary frames are not consecutive, so there is no "
+                   "motion pair to localise characters from; ID will fall back "
+                   "to whole-frame and say so",
+            approved=[p.name for p in ordered],
+        )
+        return []
+
+    region_dir = run.paths.refs / "regions"
+    region_dir.mkdir(parents=True, exist_ok=True)
+    for stale in region_dir.glob("*.png"):
+        stale.unlink()
+
+    written: list[Path] = []
+    for previous, current in pairs:
+        regions = character_regions(
+            load_image(previous), load_image(current), weights.temporal
+        )
+        image = load_image(current)
+        for index, (x, y, w, h) in enumerate(regions, start=1):
+            crop = image[y : y + h, x : x + w]
+            if crop.size == 0 or min(crop.shape[:2]) < 8:
+                continue
+            dst = region_dir / f"region_{current.stem}_{index:02d}.png"
+            Image.fromarray(crop).save(dst)
+            written.append(dst)
+
+    run.logger.info(
+        "canary.region_refs.locked",
+        count=len(written), pairs=len(pairs),
+        note="ID is scored region-against-region while these exist",
+    )
+    return written
+
+
+def _frame_index(path: Path) -> int:
+    """The 1-based index encoded in an `f_00042.png` style name."""
+    digits = "".join(c for c in path.stem if c.isdigit())
+    return int(digits) if digits else -1
 
 
 @canary_app.command("submit")

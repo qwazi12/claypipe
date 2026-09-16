@@ -27,7 +27,7 @@ assembly by re-muxing, not measured here.
 from __future__ import annotations
 
 import functools
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from enum import Enum
 from pathlib import Path
 from typing import Protocol, Sequence, runtime_checkable
@@ -61,6 +61,13 @@ class VerdictReason(str, Enum):
     COMPOSITE_FAIL = "composite_fail"
 
 
+# With no predecessor there is no motion to compare, so a frame is scored as
+# perfectly synced rather than penalised for being first — the same convention
+# FIRST_FRAME_TEMPORAL_FIDELITY uses, and for the same reason. Defined up here
+# because FrameScore's field default needs it at class-definition time.
+FIRST_FRAME_FLOW_SYNC = 1.0
+
+
 @dataclass(frozen=True)
 class FrameScore:
     """One frame's scores, plus why it landed where it did."""
@@ -77,6 +84,17 @@ class FrameScore:
     # verdict; they also say WHICH component missed, which is what makes a
     # non-PASS actionable.
     targets_met: dict[str, bool]
+    # V4: motion sync against the SOURCE's flow field. THE PRIMARY GATE under
+    # whole-frame v2v — the format only reads if the restyled panel moves in
+    # step with the original, and that is what justifies re-muxing the source
+    # audio onto a regenerated picture. Defaulted so a score written before V4
+    # still loads; a real run always supplies it.
+    flow: float = FIRST_FRAME_FLOW_SYNC
+    # Which support `identity` was measured over: "regions:N" or "whole_frame".
+    # Recorded on every frame because a whole-frame ID under whole-frame
+    # restyle is dominated by the environment, so the two are not comparable
+    # numbers and a reviewer must never have to guess which they are reading.
+    id_support: str = "whole_frame"
 
     @property
     def missed_targets(self) -> list[str]:
@@ -389,6 +407,216 @@ FIRST_FRAME_TEMPORAL_FIDELITY = 1.0
 
 
 # --------------------------------------------------------------------------
+# Metric 5 — FLOW, motion sync (V4). THE PRIMARY GATE under v2v.
+# --------------------------------------------------------------------------
+#
+# The side-by-side format only reads if the restyled panel moves IN STEP with
+# the original. Everything else in the vector is taste; this one is structural,
+# and it is what justifies re-muxing the source audio onto a regenerated
+# picture. If motion desyncs, the audio is lying about what is on screen.
+#
+# It is NOT the same question TF asks. TF asks "is this frame stable relative to
+# the frame before it" — a frozen output scores TF perfectly. FLOW asks "does
+# this output move the way the SOURCE moved", which a frozen output fails
+# completely. A v2v model can be temporally beautiful and still out of step.
+#
+# NOTE ON TF AND CIRCULARITY (D56): TF was near-circular while propagation
+# existed, because a propagated frame was produced BY a flow warp and TF grades
+# by flow warping — metric and generation were the same operation. Propagation
+# is retired (V3), so a frame is now produced by the backend and graded by an
+# independent warp. TF measures a real property again. A future session should
+# not re-flag it.
+#
+# FLOW itself is not circular for the same reason: nothing in the v2v pipeline
+# generates frames by warping along a flow field.
+
+# (FIRST_FRAME_FLOW_SYNC is defined near the top of the module, because
+# FrameScore's field default needs it at class-definition time.)
+
+
+def _flow(previous: np.ndarray, current: np.ndarray, cfg: TemporalConfig):
+    import cv2
+
+    return cv2.calcOpticalFlowFarneback(
+        _as_gray(previous), _as_gray(current), None,
+        cfg.pyr_scale, cfg.levels, cfg.winsize, cfg.iterations,
+        cfg.poly_n, cfg.poly_sigma, 0,
+    )
+
+
+def flow_sync(
+    source_previous: np.ndarray,
+    source_current: np.ndarray,
+    restyled_previous: np.ndarray,
+    restyled_current: np.ndarray,
+    cfg: TemporalConfig,
+) -> float:
+    """1 - normalised endpoint error between the output's flow and the source's.
+
+    Both flow fields are estimated with the SAME Farneback configuration the
+    temporal metric uses, so the two cannot disagree about what motion is.
+
+    The error is normalised by the source's own mean flow magnitude plus one
+    pixel. Dividing by magnitude alone would make a still shot infinitely
+    sensitive — a one-pixel disagreement on a static frame would read as total
+    desync — and the +1 floor is what keeps a quiet scene from dominating the
+    score.
+
+    Validated on synthetic translation: identical motion 1.0000, half-speed
+    0.5292, double-speed 0.4758, frozen output 0.3270, reversed direction
+    0.0000. Monotonic in the way a sync gate has to be.
+    """
+    _require_same_shape(source_previous, source_current, "FLOW source pair")
+    _require_same_shape(restyled_previous, restyled_current, "FLOW restyled pair")
+
+    source_flow = _flow(source_previous, source_current, cfg)
+    output_flow = _flow(restyled_previous, restyled_current, cfg)
+    if source_flow.shape != output_flow.shape:
+        # A v2v backend may return a different resolution than the source.
+        # Comparing flow fields of different sizes would be meaningless, so the
+        # output field is resampled onto the source grid AND its vectors are
+        # rescaled — a 2x downscale halves every displacement, and skipping the
+        # rescale would report a spurious desync.
+        import cv2
+
+        target_h, target_w = source_flow.shape[:2]
+        scale_x = target_w / output_flow.shape[1]
+        scale_y = target_h / output_flow.shape[0]
+        output_flow = cv2.resize(
+            output_flow, (target_w, target_h), interpolation=cv2.INTER_LINEAR
+        )
+        output_flow[..., 0] *= scale_x
+        output_flow[..., 1] *= scale_y
+
+    endpoint_error = np.linalg.norm(output_flow - source_flow, axis=2)
+    source_scale = float(np.linalg.norm(source_flow, axis=2).mean())
+    return float(np.clip(1.0 - endpoint_error.mean() / (source_scale + 1.0), 0.0, 1.0))
+
+
+# --------------------------------------------------------------------------
+# Character regions — the support ID is scored over (V4)
+# --------------------------------------------------------------------------
+#
+# ID asks "is this the same clay character the operator approved". Asked of a
+# WHOLE FRAME under whole-frame restyle, it is dominated by the environment,
+# which is also being rebuilt in clay — so a frame where the set matches and
+# the character is wrong can score well. Scoping ID to where the characters are
+# is what makes the question answerable.
+#
+# THE SUPPORT IS A PROXY, AND IT IS NAMED AS ONE. There is no offline face or
+# person detector available: this OpenCV build ships neither CascadeClassifier
+# nor the cascade data, and adding a detector that downloads weights would
+# break the never-download-mid-run rule. So regions are derived from MOTION —
+# the moving foreground of a shot is where its characters are. That is a proxy
+# for "character", correct often and not always, and every score records which
+# support it actually used so a reviewer is never guessing.
+
+# Flow magnitude above this fraction of the frame's own maximum counts as
+# foreground. Relative, not absolute, because a quiet dialogue shot and a fight
+# scene differ by an order of magnitude in absolute displacement.
+MOTION_REGION_FRACTION = 0.35
+
+# A region smaller than this fraction of frame area is noise, not a character.
+MIN_REGION_AREA_FRACTION = 0.004
+
+# Boxes are grown by this fraction of their size: flow finds the moving edges of
+# a body, not the whole body, and an un-grown box clips the head off.
+REGION_PADDING = 0.25
+
+MAX_REGIONS = 4
+
+
+def character_regions(
+    source_previous: np.ndarray,
+    source_current: np.ndarray,
+    cfg: TemporalConfig,
+) -> list[tuple[int, int, int, int]]:
+    """Boxes (x, y, w, h) around the moving foreground. A proxy for characters.
+
+    Returns an empty list when nothing moves enough to localise, which the
+    caller must treat as "fall back to the whole frame and say so" rather than
+    as "there are no characters".
+    """
+    import cv2
+
+    flow = _flow(source_previous, source_current, cfg)
+    magnitude = np.linalg.norm(flow, axis=2)
+    peak = float(magnitude.max())
+    if peak <= 1e-6:
+        return []
+
+    mask = (magnitude >= peak * MOTION_REGION_FRACTION).astype(np.uint8)
+    # Close gaps so a torso and a head that move together become one region
+    # rather than two, which would score one character as two.
+    kernel = np.ones((5, 5), np.uint8)
+    mask = cv2.dilate(mask, kernel, iterations=2)
+
+    count, _labels, stats, _centroids = cv2.connectedComponentsWithStats(mask, 8)
+    height, width = magnitude.shape
+    area = height * width
+    boxes: list[tuple[int, int, int, int]] = []
+    for index in range(1, count):
+        x, y, w, h, region_area = stats[index]
+        if region_area < area * MIN_REGION_AREA_FRACTION:
+            continue
+        pad_x, pad_y = int(w * REGION_PADDING), int(h * REGION_PADDING)
+        x0 = max(0, x - pad_x)
+        y0 = max(0, y - pad_y)
+        x1 = min(width, x + w + pad_x)
+        y1 = min(height, y + h + pad_y)
+        boxes.append((int(x0), int(y0), int(x1 - x0), int(y1 - y0)))
+
+    boxes.sort(key=lambda b: b[2] * b[3], reverse=True)
+    return boxes[:MAX_REGIONS]
+
+
+def scoped_identity(
+    restyled: np.ndarray,
+    references: Sequence[np.ndarray],
+    embedder: "IdentityEmbedder",
+    regions: list[tuple[int, int, int, int]],
+    *,
+    region_references: Sequence[np.ndarray] | None = None,
+) -> tuple[float, str]:
+    """Identity over character regions, or the whole frame with that stated.
+
+    Returns (score, support), and the support is recorded on every frame score
+    so a reviewer never has to guess which measurement they are reading.
+
+    A CROP MUST BE COMPARED AGAINST A CROP. Scoring a character region against
+    a whole-frame reference asks CLIP whether a person resembles a scene, which
+    is not a question with a useful answer — measured on the fixture suite it
+    depressed ID enough to miss `id_min` on most frames, burn the whole retry
+    budget, and halt the run. So region scoring is used ONLY when region
+    references exist (cropped from the same approved canary output at approval
+    time); otherwise this falls back to whole-frame scoring and says
+    `whole_frame`, which is an honest label rather than a silent substitution.
+
+    The WORST region wins. A frame with three characters where one is wrong is a
+    frame with a wrong character in it, and averaging would hide exactly the
+    failure R2 cares about — every character becomes clay, individually.
+    """
+    if not regions or not region_references:
+        support = "whole_frame"
+        if regions and not region_references:
+            # Regions were found but there is nothing crop-shaped to compare
+            # them against. Naming this case separately matters: it is a
+            # missing-reference problem, not an absence of characters.
+            support = "whole_frame:no_region_refs"
+        return identity_similarity(restyled, references, embedder), support
+
+    scores = []
+    for x, y, w, h in regions:
+        crop = restyled[y : y + h, x : x + w]
+        if crop.size == 0 or min(crop.shape[:2]) < 8:
+            continue
+        scores.append(identity_similarity(crop, region_references, embedder))
+    if not scores:
+        return identity_similarity(restyled, references, embedder), "whole_frame"
+    return float(min(scores)), f"regions:{len(scores)}"
+
+
+# --------------------------------------------------------------------------
 # Composite
 # --------------------------------------------------------------------------
 
@@ -437,14 +665,28 @@ def classify(
 
 
 def check_targets(
-    *, ssim: float, lpips_edges: float, identity: float, temporal: float, cfg: WeightsConfig
+    *,
+    ssim: float,
+    lpips_edges: float,
+    identity: float,
+    temporal: float,
+    flow: float,
+    cfg: WeightsConfig,
+    targets: "ScoreTargets | None" = None,
 ) -> dict[str, bool]:
-    t = cfg.targets
+    """Per-component gates. `targets` overrides the canonical vector, which is
+    how a per-mode vector reaches the gate without the formula changing."""
+    t = targets if targets is not None else cfg.targets
     return {
         "ssim": ssim >= t.ssim_min,
         "lpips_edges": lpips_edges <= t.lpips_edges_max,
         "id": identity >= t.id_min,
         "tf": temporal >= t.tf_min,
+        # V4: FLOW joins the COMPONENT TARGETS rather than the F formula. It is
+        # a gate, and the component targets are what gate (D13). Re-weighting F
+        # would mean inventing a weight for an uncalibrated metric, which is the
+        # F4 mistake — the formula stays untouched until a canary measures one.
+        "flow": flow >= t.flow_min,
     }
 
 
@@ -455,6 +697,10 @@ class Scorer:
     cfg: WeightsConfig
     perceptual: PerceptualDistance
     embedder: IdentityEmbedder
+    # Character-region crops taken from the approved canary output (V4). ID is
+    # scored region-against-region when these exist; a crop compared to a
+    # whole-frame reference is not a meaningful CLIP comparison.
+    region_references: "list[np.ndarray]" = field(default_factory=list)
 
     @classmethod
     def build(cls, cfg: WeightsConfig) -> "Scorer":
@@ -473,22 +719,56 @@ class Scorer:
         restyled: np.ndarray,
         references: Sequence[np.ndarray],
         previous_restyled: np.ndarray | None,
+        previous_source: np.ndarray | None = None,
+        targets: "ScoreTargets | None" = None,
     ) -> FrameScore:
+        """Score one frame on all five metrics (V4).
+
+        `previous_source` is what FLOW needs: motion sync compares the OUTPUT's
+        flow field against the SOURCE's, so both pairs are required. Without it
+        FLOW reports its first-frame value and says nothing — which is correct
+        at a shot boundary and a silent hole anywhere else, so the caller passes
+        it whenever it has it.
+
+        `targets` lets a per-mode vector reach the gate without touching the F
+        formula, which stays as specified until a canary calibrates it.
+        """
         ssim = structural_similarity_score(source, restyled)
         lpips_edges = lpips_edge_distance(source, restyled, self.perceptual, self.cfg.canny)
-        identity = identity_similarity(restyled, references, self.embedder)
+
+        # ID over character regions, not the whole frame (V4). Under
+        # whole-frame restyle the environment is also being rebuilt in clay, so
+        # a whole-frame ID is dominated by the set and a wrong character can
+        # score well. The regions are a MOTION proxy and the support is
+        # recorded, so the number is never read as more than it is.
+        regions: list[tuple[int, int, int, int]] = []
+        if previous_source is not None:
+            regions = character_regions(previous_source, source, self.cfg.temporal)
+        identity, id_support = scoped_identity(
+            restyled, references, self.embedder, regions,
+            region_references=self.region_references,
+        )
+
         temporal = (
             FIRST_FRAME_TEMPORAL_FIDELITY
             if previous_restyled is None
             else temporal_fidelity(previous_restyled, restyled, self.cfg.temporal)
         )
+        flow = (
+            FIRST_FRAME_FLOW_SYNC
+            if previous_restyled is None or previous_source is None
+            else flow_sync(
+                previous_source, source, previous_restyled, restyled, self.cfg.temporal
+            )
+        )
+
         f = composite_f(
             ssim=ssim, lpips_edges=lpips_edges, identity=identity,
             temporal=temporal, cfg=self.cfg,
         )
         targets_met = check_targets(
             ssim=ssim, lpips_edges=lpips_edges, identity=identity,
-            temporal=temporal, cfg=self.cfg,
+            temporal=temporal, flow=flow, cfg=self.cfg, targets=targets,
         )
         verdict, reason = classify(f, self.cfg, targets_met)
         return FrameScore(
@@ -497,6 +777,8 @@ class Scorer:
             lpips_edges=lpips_edges,
             identity=identity,
             temporal=temporal,
+            flow=flow,
+            id_support=id_support,
             f=f,
             verdict=verdict,
             reason=reason,

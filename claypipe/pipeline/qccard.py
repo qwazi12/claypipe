@@ -43,7 +43,80 @@ def summarise_scores(scores_path: Path) -> dict | None:
         "p5_F": round(ordered[p5_index], 4),
         "scored_frames": len(ordered),
         "verdicts": verdicts,
+        # V4: all five metrics reported per-component, not just the composite.
+        # While the mode is uncalibrated the observed values ARE the
+        # deliverable — the target vector is set from them, so a card that
+        # showed only F would throw away the measurement the canary is for.
+        "components": _summarise_components(scores_path),
     }
+
+
+# The five metrics, and which direction is better. `lpips_edges` is a DISTANCE,
+# so lower is better and its worst case is the maximum — getting that backwards
+# would report the best frame as the worst.
+COMPONENTS = {
+    "ssim": "higher",
+    "lpips_edges": "lower",
+    "id": "higher",
+    "tf": "higher",
+    "flow": "higher",
+}
+
+# scores.jsonl field names, which differ from the target names for historical
+# reasons (`identity` vs `id`, `temporal` vs `tf`).
+COMPONENT_FIELDS = {
+    "ssim": "ssim",
+    "lpips_edges": "lpips_edges",
+    "id": "identity",
+    "tf": "temporal",
+    "flow": "flow",
+}
+
+
+def _summarise_components(scores_path: Path) -> dict:
+    """Per-metric mean and worst value, plus which support ID used.
+
+    FLOW is listed first in the returned dict because it is the primary gate
+    under v2v: the format only reads if the restyled panel moves in step with
+    the original, and that is what justifies re-muxing the source audio.
+    """
+    collected: dict[str, list[float]] = {name: [] for name in COMPONENTS}
+    supports: dict[str, int] = {}
+    misses: dict[str, int] = {}
+
+    for line in scores_path.read_text().splitlines():
+        if not line.strip():
+            continue
+        record = json.loads(line)
+        for name, field in COMPONENT_FIELDS.items():
+            if field in record and record[field] is not None:
+                collected[name].append(float(record[field]))
+        support = record.get("id_support")
+        if support:
+            supports[support] = supports.get(support, 0) + 1
+        for name, ok in (record.get("targets_met") or {}).items():
+            if not ok:
+                misses[name] = misses.get(name, 0) + 1
+
+    out: dict[str, Any] = {}
+    for name in ("flow", "tf", "id", "ssim", "lpips_edges"):
+        values = collected.get(name) or []
+        if not values:
+            continue
+        worst = max(values) if COMPONENTS[name] == "lower" else min(values)
+        out[name] = {
+            "mean": round(sum(values) / len(values), 4),
+            "worst": round(worst, 4),
+            "better": COMPONENTS[name],
+            "n": len(values),
+            "target_misses": misses.get(name, 0),
+        }
+    if supports:
+        # Which support ID was measured over. A whole-frame ID under
+        # whole-frame restyle is dominated by the environment, so the two are
+        # not comparable numbers and the card must not blur them.
+        out["id_support"] = supports
+    return out
 
 
 def cost_from_ledger(ledger_path: Path) -> dict:

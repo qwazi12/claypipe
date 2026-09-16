@@ -175,8 +175,20 @@ def test_boundaries_are_skipped_by_temporal_scoring():
             return {"frame": "x"}
 
     class FakeScorer:
-        def score_frame(self, *, frame, source, restyled, references, previous_restyled):
+        # V4 added previous_source (FLOW needs the SOURCE's motion too) and an
+        # optional per-mode target vector. Both are withheld at a boundary for
+        # the same reason previous_restyled is: flow across a cut measures
+        # nothing.
+        def score_frame(
+            self, *, frame, source, restyled, references, previous_restyled,
+            previous_source=None, targets=None,
+        ):
             seen.append((frame, previous_restyled is None))
+            assert (previous_source is None) == (previous_restyled is None), (
+                "FLOW's source pair must be withheld exactly when the restyled "
+                "pair is, or a boundary frame would be scored against a "
+                "different scene"
+            )
             return FakeScore()
 
     class FakeController:

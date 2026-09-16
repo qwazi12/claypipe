@@ -113,6 +113,51 @@ The FORMULA is fixed in code. The weights are config and must sum to 1.0.
 | `lpips_edges_max` | 0.35 | Perceptual distance on Canny edges. Lower is better. |
 | `id_min` | 0.85 | CLIP cosine against the locked identity references. |
 | `tf_min` | 0.95 | Temporal fidelity. Raised from 0.80 by Decision 2 (D14) — at 0.80 it was unbreachable. |
+| `flow_min` | **0.0** | Motion sync against the source's flow field. **THE PRIMARY GATE under v2v — and deliberately not gating yet.** 0.0 means "report, do not gate": the number must come from a canary measurement, never from a guess. |
+
+### The five metrics, and what each asks
+
+| Metric | Support | Asks | Direction |
+|---|---|---|---|
+| **FLOW** | output flow vs source flow | did motion stay synced? | **high — primary** |
+| TF | whole frame | is the output temporally stable? | high |
+| ID | character regions | is this the same clay character? | high |
+| SSIM | whole frame | did the scene layout survive at all? | moderate band |
+| LPIPS-edges | whole frame | did composition drift? | moderate |
+
+**FLOW is not TF.** TF asks whether a frame is stable relative to the one
+before it, so a FROZEN output scores TF perfectly. FLOW asks whether the output
+moves the way the SOURCE moved, which a frozen output fails completely. A v2v
+model can be temporally beautiful and still out of step — and the side-by-side
+format only reads if both panels move together. That is also what justifies
+re-muxing the source audio onto a regenerated picture: if motion desyncs, the
+audio is lying about what is on screen.
+
+FLOW is a **component target**, not a term in F. Re-weighting the composite
+would mean inventing a weight for an uncalibrated metric, which is exactly the
+F4 mistake; component targets are what gate (D13), so that is where it belongs.
+The F formula is unchanged.
+
+**TF is no longer circular.** D56 flagged it because a propagated frame was
+PRODUCED by a flow warp while TF GRADES by flow warping — metric and generation
+were the same operation. V3 retired propagation, so frames now come from the
+backend and are graded by an independent warp. TF measures a real property
+again, and a future session should not re-flag it.
+
+**ID is scored region-against-region.** Under whole-frame restyle the
+environment is rebuilt in clay too, so a whole-frame ID is dominated by the set
+and a wrong character can still score well. Regions come from motion between
+consecutive frames — a proxy for "character", since this OpenCV build ships no
+face detector and adding one that downloads weights would break the
+never-download-mid-run rule.
+
+A crop is **never** compared against a whole-frame reference: that asks CLIP
+whether a person resembles a scene. Measured on the fixture suite it depressed
+ID enough to miss `id_min` on most frames, exhaust the retry budget and halt
+the run. So region scoring engages only when region references exist (cropped
+from the same approved canary output); otherwise ID falls back to whole-frame
+and every score records which support it used — `regions:N`, `whole_frame`, or
+`whole_frame:no_region_refs`.
 
 These are GATING, not diagnostic — see `thresholds.require_component_targets`.
 

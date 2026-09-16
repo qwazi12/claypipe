@@ -319,8 +319,56 @@ def test_classify_boundaries_are_inclusive_at_the_bottom(cfg) -> None:
 
 def test_targets_report_which_component_missed(cfg) -> None:
     """A verdict is far more actionable when it names the offending metric."""
-    met = S.check_targets(ssim=0.30, lpips_edges=0.90, identity=0.99, temporal=0.99, cfg=cfg)
-    assert met == {"ssim": False, "lpips_edges": False, "id": True, "tf": True}
+    met = S.check_targets(
+        ssim=0.30, lpips_edges=0.90, identity=0.99, temporal=0.99, flow=0.99,
+        cfg=cfg,
+    )
+    assert met == {
+        "ssim": False, "lpips_edges": False, "id": True, "tf": True,
+        # V4: FLOW is a component target, not a term in F — it gates, and the
+        # component targets are what gate (D13).
+        "flow": True,
+    }
+
+
+def test_flow_reports_but_does_not_yet_gate(cfg) -> None:
+    """V4 ships FLOW measuring and NOT gating, deliberately.
+
+    `targets.flow_min` is 0.0 because no threshold has been measured. The rule
+    is set-no-thresholds-now, and it has been violated twice at real debugging
+    cost: a guessed gate either passes everything or rejects everything, and
+    both look like a working run. The number comes from the canary.
+
+    So a catastrophic FLOW of 0.0 is REPORTED and still "met" today. The next
+    test proves the gate works the moment a vector supplies a threshold.
+    """
+    assert cfg.targets.flow_min == 0.0, (
+        "a flow threshold was set without a canary measurement behind it"
+    )
+    met = S.check_targets(
+        ssim=0.99, lpips_edges=0.01, identity=0.99, temporal=0.99, flow=0.0,
+        cfg=cfg,
+    )
+    assert "flow" in met, "FLOW must be reported even while uncalibrated"
+    assert met["flow"] is True
+
+
+def test_a_per_mode_target_vector_reaches_the_gate(cfg) -> None:
+    """The per-mode vector must gate without the F formula changing — the
+    formula stays as specified until a canary calibrates it."""
+    from claypipe.config import ScoreTargets
+
+    strict = ScoreTargets(
+        ssim_min=0.0, lpips_edges_max=1.0, id_min=0.0, tf_min=0.0, flow_min=0.95
+    )
+    met = S.check_targets(
+        ssim=0.1, lpips_edges=0.9, identity=0.1, temporal=0.1, flow=0.90,
+        cfg=cfg, targets=strict,
+    )
+    # Only FLOW is gated by this vector, and 0.90 misses its 0.95.
+    assert met == {
+        "ssim": True, "lpips_edges": True, "id": True, "tf": True, "flow": False
+    }
 
 
 def test_frames_of_different_sizes_are_rejected(cfg) -> None:

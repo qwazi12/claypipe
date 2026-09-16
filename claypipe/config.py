@@ -126,6 +126,11 @@ class ScoreTargets(BaseModel):
     lpips_edges_max: float
     id_min: float
     tf_min: float
+    # V4: motion sync against the source's flow field. The primary gate under
+    # whole-frame v2v. Defaults to 0.0 so a config written before V4 loads and
+    # reports FLOW without gating on an invented number — the value has to come
+    # from a canary measurement, not from here.
+    flow_min: float = 0.0
 
 
 # T13/A1 — the scoring gate is MODE-DEPENDENT.

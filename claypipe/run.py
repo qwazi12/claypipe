@@ -106,6 +106,13 @@ class RunManifest(BaseModel):
     #              asks "is this the same clay character the operator signed
     #              off", which is the question it exists for.
     reference_origin: str = "intake"
+    # V4: character-region crops taken from the SAME approved canary frames.
+    # ID is scored region-against-region under whole-frame v2v, because a
+    # whole-frame ID is dominated by the environment — which is also being
+    # rebuilt in clay — so a wrong character can score well. A crop must be
+    # compared against a crop; empty here means ID falls back to whole-frame
+    # and the score says so.
+    reference_regions: list[str] = Field(default_factory=list)
     # Set by verdi.loaders.merge_prompt_override when a canary comes back
     # "adjust". Points AT the override file; the original style prompt in
     # styles.yaml is never touched.
