@@ -361,7 +361,6 @@ class _FalVaceClient:  # pragma: no cover - requires network and a credential
         num_frames, frames_per_second, seed, model,
     ) -> bytes:
         import fal_client
-        import urllib.request
 
         uploaded = fal_client.upload_file(str(video_path))
         arguments = {
@@ -386,5 +385,27 @@ class _FalVaceClient:  # pragma: no cover - requires network and a credential
                 f"fal returned no video url for {model}",
                 response_body=json.dumps(result)[:2000],
             )
-        with urllib.request.urlopen(url) as response:
-            return response.read()
+
+        # Downloaded with httpx, NOT urllib.
+        #
+        # This is not a style preference — it cost a paid generation. urllib
+        # uses the SYSTEM trust store, which fails behind TLS interception
+        # ("self-signed certificate in certificate chain"), while fal_client
+        # uses httpx with certifi and works fine. So the upload and the
+        # generation both SUCCEEDED and the download then failed, which is the
+        # worst possible split: charged for a result that was never retrieved.
+        #
+        # Using the same client as the upload means the download cannot fail on
+        # trust grounds that the rest of the call already cleared.
+        import httpx
+
+        try:
+            response = httpx.get(url, timeout=300.0, follow_redirects=True)
+            response.raise_for_status()
+        except Exception as exc:
+            raise VaceError(
+                f"the generation SUCCEEDED and was CHARGED, but the result "
+                f"could not be downloaded from {url}: {exc}. The spend is in "
+                "the ledger as authorised-but-unreconciled."
+            ) from exc
+        return response.content

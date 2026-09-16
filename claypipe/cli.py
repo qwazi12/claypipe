@@ -910,10 +910,18 @@ def batch(
 
     profile = styles.profile(run.manifest.style)
     prompt = _effective_prompt(run, profile)
+
+    # A clip-only backend (Wan VACE) has no per-frame implementation by design
+    # — the two protocols are deliberately separate (A4) — so the per-frame
+    # resolver is tried but a failure is not fatal here. The v2v path resolves
+    # its own clip backend below; the retired per-frame path needs this one and
+    # fails on it there.
+    backend = None
+    backend_error: str | None = None
     try:
         backend = get_backend(run.manifest.backend, live=live)
     except (NotImplementedError, ValueError) as exc:
-        _fail(str(exc))
+        backend_error = str(exc)
 
     ledger = SpendLedger(
         paths=run.paths, project_dir=Path(base), cfg=weights.firewalls,
@@ -959,7 +967,10 @@ def batch(
         if run.manifest.mode in weights.modes else None,
         price_unit=weights.firewalls.cost.unit_for(run.manifest.backend),
     )
-    scorer, controller, references = _build_scoring(run, weights, backend, extracted, profile)
+    scorer, controller, references = (
+        _build_scoring(run, weights, backend, extracted, profile)
+        if backend is not None else (None, None, [])
+    )
 
     # ---- V5: whole-frame video-to-video, the architecture ---------------
     if run.manifest.mode != LEGACY_MODE and not propagate_keyframes:
@@ -976,6 +987,11 @@ def batch(
             f"{run.paths.chunk_plan.name}"
         )
         raise typer.Exit(0)
+
+    # Past this point every path is per-frame, so a missing per-frame backend
+    # is now fatal rather than merely noted.
+    if backend is None:
+        _fail(backend_error or f"unknown backend {run.manifest.backend!r}")
 
     # ---- RETIRED: adaptive keyframe propagation -------------------------
     if propagate_keyframes:
@@ -1257,7 +1273,32 @@ def _canary_restyle_clip(
         except shots.ShotDetectionError:
             pass
 
-    chunk = sources[start - 1 : start - 1 + want]
+    # C4 MUST apply here too. Wiring it into the batch path only meant the
+    # canary judged a DIFFERENT input than production would use — and on this
+    # clip the difference is visible: the canary's output still carried the
+    # burned-in captions the batch would have stripped. A canary that does not
+    # see what production sees is not a canary.
+    control_source = sources
+    burn = run.manifest.burned_in_text or {}
+    if burn.get("detected"):
+        try:
+            report = inpaint.inpaint_frames(
+                frames=sources, out_dir=run.paths.restyle_input_frames,
+                burn_in_report=burn, logger=run.logger,
+            )
+        except inpaint.InpaintError as exc:
+            run.logger.warn("canary.inpaint.skipped", error=str(exc))
+        else:
+            candidate = frame_paths(run.paths.restyle_input_frames)
+            if len(candidate) == len(sources):
+                control_source = candidate
+                typer.echo(
+                    f"caption band inpainted out of the canary input: rows "
+                    f"{report.band_top}-{report.band_bottom} "
+                    f"({report.frames} frames)"
+                )
+
+    chunk = control_source[start - 1 : start - 1 + want]
     try:
         clip_backend = get_clip_backend(run.manifest.backend, live=live)
     except ValueError as exc:
@@ -1277,12 +1318,11 @@ def _canary_restyle_clip(
         # Priced in FRAMES (V1): VACE bills frame-count/16, so pricing the
         # floor as a wall-clock duration would quote the wrong figure in the
         # very warning that exists to stop the operator overpaying.
+        ledger_key = getattr(clip_backend, "ledger_backend", clip_backend.name)
         billed = weights.firewalls.cost.price_for(
-            clip_backend.name, frames=clip_backend.min_chunk_frames
+            ledger_key, frames=clip_backend.min_chunk_frames
         )
-        asked = weights.firewalls.cost.price_for(
-            clip_backend.name, frames=len(chunk)
-        )
+        asked = weights.firewalls.cost.price_for(ledger_key, frames=len(chunk))
         run.logger.warn(
             "canary.restyle.below_min_chunk",
             asked_frames=len(chunk),
@@ -1334,8 +1374,15 @@ def _canary_restyle_clip(
         scored=False,
         reason="no identity references exist yet — T10 makes the approved "
                "output of this stage into them",
+        # frames/16, NOT frames/fps. The ledger had this right and this log
+        # line did not: 81 frames at $0.04 is $0.2025, and dividing by the
+        # pipeline's 12fps instead reported $0.27 — the exact 2x-class error
+        # the frames_div_16 unit exists to prevent, reintroduced in a log.
         est_cost_usd=round(
-            clip_backend.cost_per_video_second_usd() * len(written) / fps, 4
+            clip_backend.cost_per_video_second_usd()
+            * len(written)
+            / BILLED_FRAMES_PER_SECOND,
+            4,
         ),
     )
     typer.echo(
@@ -1416,11 +1463,12 @@ def canary_restyle(
 
     profile = styles.profile(run.manifest.style)
     prompt = _effective_prompt(run, profile)
-    try:
-        backend = get_backend(run.manifest.backend, live=live)
-    except (NotImplementedError, ValueError) as exc:
-        _fail(str(exc))
 
+    # The PER-FRAME backend is resolved inside the frames branch only. A
+    # clip-only backend (Wan VACE) has no per-frame implementation by design —
+    # the two protocols are separate (A4) — so resolving it up here refused
+    # every v2v canary with "unknown backend" before it could reach the clip
+    # path that does know it.
     source = Path(run.manifest.source_path)
     if not source.is_file():
         _fail(f"source video has moved or been deleted: {source}")
@@ -1476,8 +1524,13 @@ def canary_restyle(
             "this run is mode 'resynth', so a three-frame canary would approve "
             "something nobody looked at — temporal behaviour is the only reason "
             "to use a video model, and a still shows none of it. Use "
-            "`canary restyle --clip <seconds>`."
+            "`canary restyle --clip-floor`."
         )
+
+    try:
+        backend = get_backend(run.manifest.backend, live=live)
+    except (NotImplementedError, ValueError) as exc:
+        _fail(str(exc))
 
     chosen, third_caption = _canary_frame_names(sources, plan)
     run.paths.restyled_frames.mkdir(parents=True, exist_ok=True)

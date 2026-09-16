@@ -253,6 +253,13 @@ def restyle_clip_range(
     start = 0
     chunk_index = 0
 
+    # Which `firewalls.cost.pricing` key this backend bills against. VACE is
+    # priced PER RESOLUTION — 480p and 720p are one endpoint at two rates — so
+    # charging both to a single `wan_vace` key would make the run total
+    # unreconcilable against the invoice, and leaves the key unpriced entirely.
+    # The unpriced-backend firewall caught exactly that before the first call.
+    ledger_key = getattr(backend, "ledger_backend", backend.name)
+
     while start < total:
         remaining = total - start
         size = min(backend.max_chunk_frames, remaining)
@@ -281,7 +288,7 @@ def restyle_clip_range(
         if ledger is not None:
             entry_id = ledger.authorize(
                 frame=f"clip_{chunk[0].stem}-{chunk[-1].stem}",
-                backend=backend.name, stage="batch", frames=len(chunk),
+                backend=ledger_key, stage="batch", frames=len(chunk),
             )
         produced = backend.restyle_clip(
             chunk, out_dir, prompt=prompt, strength=strength, seed=seed + chunk_index
@@ -315,7 +322,8 @@ def restyle_clip_range(
 
     logger.info(
         "restyle.clip",
-        backend=backend.name, frames=len(written), chunks=chunk_index,
+        backend=backend.name, ledger_backend=ledger_key,
+        frames=len(written), chunks=chunk_index,
         est_cost_usd=round(
             backend.cost_per_video_second_usd()
             * len(written)

@@ -433,12 +433,17 @@ def test_the_floor_comes_from_the_backend_not_a_constant():
     assert "floor_frames = 81" not in source
 
 
-def test_an_unknown_backend_fails_loudly_before_any_floor_is_resolved(
+def test_an_unknown_backend_fails_loudly_while_resolving_the_floor(
     test_clip: Path, tmp_path: Path
 ):
-    """An unknown backend is refused by the per-frame resolver first, before the
-    floor probe is ever reached — so the refusal is early and the message names
-    the backend."""
+    """V7 moved the per-frame resolver INTO the frames branch, because a
+    clip-only backend (Wan VACE) has no per-frame implementation by design and
+    resolving it up front refused every v2v canary with "unknown backend".
+
+    So an unknown backend is now caught while resolving the CLIP floor, and the
+    refusal must still name it. A blanket `except Exception` there silently
+    resolved the floor to ONE FRAME — the canary ran, cost a call, and showed
+    the operator 0.08 seconds."""
     from claypipe.config import load_styles
 
     run = Run.create(
@@ -452,7 +457,7 @@ def test_an_unknown_backend_fails_loudly_before_any_floor_is_resolved(
               "--runs-dir", str(tmp_path / "runs"), "--clip-floor"],
     )
     assert result.exit_code != 0
-    assert "unknown backend 'nonexistent'" in result.output
+    assert "unknown clip backend 'nonexistent'" in result.output
 
 
 def test_the_gate_is_unchanged_by_v6(resynth_run: Run):
