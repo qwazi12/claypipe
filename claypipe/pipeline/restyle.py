@@ -184,15 +184,29 @@ def get_backend(name: str, *, live: bool = False) -> RestyleBackend:
     raise ValueError(f"unknown backend {name!r} (available: dummy, fal)")
 
 
-def get_clip_backend(name: str, *, live: bool = False) -> ClipRestyleBackend:
+def get_clip_backend(
+    name: str,
+    *,
+    live: bool = False,
+    control_signal: str = "depth",
+    resolution: str = "480p",
+) -> ClipRestyleBackend:
     """Track C backends. Separate resolver, because the protocols are separate
     (A4) and a caller that wants a clip backend must not silently receive a
     per-frame one."""
     if name in ("dummy", "dummy_clip"):
         return DummyClipBackend()
+    if name in ("wan_vace", "vace"):
+        from .vace import VaceBackend, get_vace_client
+
+        return VaceBackend(
+            live=live,
+            client=get_vace_client(live=live),
+            control_signal=control_signal,
+            resolution=resolution,
+        )
     raise ValueError(
-        f"unknown clip backend {name!r} (available: dummy_clip). Wan VACE and "
-        "Runway Aleph land with T16/T19 — no Track C endpoint is wired yet."
+        f"unknown clip backend {name!r} (available: dummy_clip, wan_vace)."
     )
 
 

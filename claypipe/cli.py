@@ -616,7 +616,7 @@ def _warn_on_source_origin_references(run: Run, references: list[Path]) -> None:
 
 
 # Backends that cost real money. Everything not listed here is free.
-PAID_BACKENDS = {"fal"}
+PAID_BACKENDS = {"fal", "wan_vace", "vace"}
 
 
 def _guard_paid_backend(backend: str, *, live: bool) -> None:
