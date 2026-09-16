@@ -19,7 +19,7 @@ from .config import ConfigError, load_all
 from .pipeline import assemble as assemble_stage
 from .pipeline import qccard
 from .pipeline.extract import count_frames, extract_audio, extract_frames, frame_paths
-from .pipeline import burnin, captions, chunks, propagate, shots
+from .pipeline import burnin, captions, chunks, inpaint, propagate, shots
 from .pipeline.shots import SEED_BASE
 from .config import BILLED_FRAMES_PER_SECOND
 from .pipeline.layout import LayoutError, source_aspect_of
@@ -357,6 +357,38 @@ def _run_v2v(
     drives retry variety) and is wrong here.
     """
     sources = frame_paths(run.paths.source_frames)
+
+    # C4: strip burned-in captions from the GENERATOR'S INPUT only. Under
+    # whole-frame v2v those glyphs are restyled along with everything else, so
+    # the comparison panel fills with melted clay lettering — the model
+    # spending its effort on typography. Measured on the Sheldon clip: 65.5% of
+    # frames carry caption ink. The original panel keeps its captions and the
+    # audio is untouched.
+    control_frames = sources
+    burn = run.manifest.burned_in_text or {}
+    if burn.get("detected"):
+        try:
+            report = inpaint.inpaint_frames(
+                frames=sources, out_dir=run.paths.restyle_input_frames,
+                burn_in_report=burn, logger=run.logger,
+            )
+        except inpaint.InpaintError as exc:
+            run.logger.warn("inpaint.skipped", error=str(exc))
+        else:
+            control_frames = frame_paths(run.paths.restyle_input_frames)
+            if len(control_frames) != len(sources):
+                _fail(
+                    f"caption inpainting produced {len(control_frames)} frames "
+                    f"for {len(sources)} sources. The generator's input must be "
+                    "frame-for-frame with the source or every chunk lands on "
+                    "the wrong range."
+                )
+            typer.echo(
+                f"caption band inpainted out of the restyle input: rows "
+                f"{report.band_top}-{report.band_bottom} of {report.frame_height} "
+                f"({report.frames} frames). The original panel keeps its captions."
+            )
+
     try:
         clip_backend = get_clip_backend(
             run.manifest.backend, live=live,
@@ -408,7 +440,10 @@ def _run_v2v(
 
     produced = 0
     for chunk in chunk_plan.chunks:
-        window = sources[chunk.start_frame - 1 : chunk.end_frame]
+        # The generator reads the CONTROL frames (caption-free when C4 ran);
+        # the output is written under the SOURCE frame names so every
+        # downstream stage still finds it.
+        window = control_frames[chunk.start_frame - 1 : chunk.end_frame]
         written = restyle_clip_range(
             backend=clip_backend, src_frames=window,
             out_dir=run.paths.restyled_frames, prompt=prompt,

@@ -196,6 +196,16 @@ class RunPaths:
         return self.root / "keyframes.json"
 
     @property
+    def restyle_input_frames(self) -> Path:
+        """Source frames with the burned-in caption band inpainted out (C4).
+
+        Fed to the GENERATOR only. The original panel keeps its own captions —
+        they are part of what the viewer compares against — and the audio is
+        untouched. Absent when the source carries no burned-in text, in which
+        case the generator reads `source_frames` directly."""
+        return self.root / "frames" / "restyle_input"
+
+    @property
     def chunk_plan(self) -> Path:
         """Generation chunks and where their seams fall (V5). A seam is where
         two independently generated chunks meet and the clay design can shift;
