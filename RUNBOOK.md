@@ -45,10 +45,11 @@ crashed run resumable.
 
 ```bash
 # STAGE 0 — register the clip. Probes it, locks the style, detects burned-in text.
+# Defaults to --mode resynth: whole-frame video-to-video, THE ARCHITECTURE.
 RUN=$(claypipe intake input.mp4 --style clay --title "Show (S01E01)")
 
-# STAGE 1 — restyle ONLY the 3 canary frames, then review and decide.
-claypipe canary restyle "$RUN"          # add --live for a paid backend
+# STAGE 1 — restyle a short CLIP canary, then review and decide.
+claypipe canary restyle "$RUN" --clip-floor   # add --live for a paid backend
 claypipe canary render "$RUN"
 claypipe canary pack "$RUN"             # opens the page in a browser
 claypipe canary submit "$RUN" --url '<paste the address bar here>'
@@ -70,15 +71,24 @@ claypipe export "$RUN"                  # JSON snapshot, no local paths
 
 `$RUN` is a directory path; a bare run id also works.
 
-### Track C (video-native) differs in one place
+### The retired per-frame path
 
 ```bash
-RUN=$(claypipe intake input.mp4 --style clay --mode resynth)
-claypipe canary restyle "$RUN" --clip 5.1    # NOT 3s — see §6
+RUN=$(claypipe intake input.mp4 --style clay --mode surface)   # warns
+claypipe canary restyle "$RUN"                # three stills, no --clip
 ```
 
-A resynth run **refuses** a three-frame canary, and `batch` refuses a resynth
-run whose canary was the wrong kind. Three stills cannot canary a video model.
+Kept for one release. A resynth run **refuses** a three-frame canary, and
+`batch` refuses a resynth run whose canary was the wrong kind — three stills
+cannot canary a video model, because temporal behaviour is the only reason to
+use one. `--propagate` belongs to this path and is refused on v2v.
+
+### v2v control signal
+
+`--control-signal depth` (default, holds proportions tighter) or `pose`
+(loosest, most figurine-like). **fal's VACE offers no canny or lineart mode** —
+verified on the API schema — so the silhouette-locking option is not
+purchasable at any price.
 
 ---
 
@@ -248,10 +258,24 @@ Read this before any `--live` run.
 - `--propagate` cuts paid frames 5-12x (measured: 7.5x on a 16:9 reference
   slice, 4.97x on the busier square clip). Every frame still exists on disk, so
   the frame-count invariant and audio guarantee are untouched.
-- A clip backend has a **minimum chunk**. Wan VACE's floor is 81 frames at
-  16fps native = **5.06 video-seconds = $0.20**. A 3-second canary is 36 frames
-  at 12fps and is **not purchasable** — it bills the minimum or pads the range,
-  and padding breaks the duration invariant. Ask for at least 5.1s.
+- A clip backend has a **minimum chunk**. Wan VACE's floor is **81 frames**,
+  and that single number wears two different "seconds":
+
+  | | frames | at | seconds |
+  |---|---|---|---|
+  | **Timeline** (what `--clip` takes) | 81 | 12 fps | **6.75 s** |
+  | **Billed** (what fal charges) | 81 | /16 | **5.0625 s** = $0.2025 at 480p |
+
+  So "the 5.06-second floor" is **6.75** timeline seconds. Typing
+  `--clip 5.06` buys 61 frames — under the floor, and billed at the floor
+  anyway. **Use `--clip-floor`**, which reads the minimum off the backend and
+  prints both figures.
+
+- A 60-second clip at 12fps is 720 frames, billed 720/16 = 45 seconds =
+  **$1.80** at 480p. Not $2.40 — see CONFIG.md on `frames_div_16`.
+
+- **A source under 81 frames (6.75s at 12fps) cannot be canaried or batched at
+  all** on a v2v backend. This is a hard product constraint, not a tuning knob.
 
 ---
 

@@ -187,11 +187,12 @@ def test_asking_for_more_clip_than_exists_is_refused(resynth_run: Run):
     assert "Ask for less" in result.output
 
 
-@pytest.mark.parametrize("bad", ["0", "-2"])
-def test_a_non_positive_clip_duration_is_refused(resynth_run: Run, bad):
-    result = _canary(resynth_run, "--clip", bad)
+def test_a_negative_clip_duration_is_refused(resynth_run: Run):
+    """V6 made 0 MEANINGFUL — it asks for the backend's floor — so only a
+    negative duration is now an error."""
+    result = _canary(resynth_run, "--clip", "-2")
     assert result.exit_code != 0
-    assert "positive duration" in result.output
+    assert "non-negative" in result.output
 
 
 def test_a_clip_below_the_backend_minimum_warns_with_the_real_arithmetic(resynth_run: Run):
@@ -373,3 +374,97 @@ def test_the_dummy_clip_backend_moves_geometry(tmp_path: Path):
     assert any(
         np.abs(arrays[i] - arrays[i + 1]).mean() > 0.0 for i in range(len(arrays) - 1)
     )
+
+
+# ---------------------------------------------------------------------------
+# V6 — the canary at the PURCHASABLE FLOOR, and the units trap it closes.
+#
+# Two different "seconds" are in play and they are not the same number:
+#   TIMELINE seconds — what `--clip` takes, at the run's fps (12).
+#   BILLED seconds   — what fal charges, frames/16.
+# VACE's floor of 81 frames is 6.75 TIMELINE seconds but 5.0625 BILLED seconds.
+# An operator who reads "the 5.06s floor" and types `--clip 5.06` buys 61
+# frames — below the floor, and billed at the floor anyway.
+# ---------------------------------------------------------------------------
+
+def test_clip_floor_resolves_to_the_backend_minimum(resynth_run: Run):
+    result = _canary(resynth_run, "--clip-floor")
+    assert result.exit_code == 0, result.output
+    assert len(frame_paths(resynth_run.paths.restyled_frames)) == 81
+
+
+def test_clip_floor_reports_both_kinds_of_second(resynth_run: Run):
+    """The trap is closed by SAYING BOTH numbers, not by picking one."""
+    assert _canary(resynth_run, "--clip-floor").exit_code == 0
+    logged = [json.loads(line) for line in resynth_run.paths.log.read_text().splitlines()]
+    floor = next(e for e in logged if e["event"] == "canary.restyle.clip_floor")
+    assert floor["frames"] == 81
+    assert floor["timeline_seconds"] == pytest.approx(6.75)
+    assert floor["billed_seconds"] == pytest.approx(5.0625)
+
+
+def test_asking_for_the_billed_figure_buys_less_than_the_floor(resynth_run: Run):
+    """This is the mistake --clip-floor exists to prevent, demonstrated.
+
+    `--clip 5.06` reads like "the purchasable floor" and is not: it is 61
+    frames at 12fps, under the 81-frame minimum, which the backend bills at the
+    minimum regardless. The run still warns."""
+    result = _canary(resynth_run, "--clip", "5.06")
+    assert result.exit_code == 0, result.output
+    assert len(frame_paths(resynth_run.paths.restyled_frames)) == 61
+    logged = [json.loads(line) for line in resynth_run.paths.log.read_text().splitlines()]
+    assert any(e["event"] == "canary.restyle.below_min_chunk" for e in logged)
+
+
+def test_clip_zero_is_the_same_as_clip_floor(resynth_run: Run):
+    assert _canary(resynth_run, "--clip", "0").exit_code == 0
+    assert len(frame_paths(resynth_run.paths.restyled_frames)) == 81
+
+
+def test_the_floor_comes_from_the_backend_not_a_constant():
+    """Hardcoding 81 here would drift the moment a backend with different
+    bounds is added. It is read off the resolved backend."""
+    import inspect
+
+    from claypipe import cli
+
+    source = inspect.getsource(cli._canary_restyle_clip)
+    assert "min_chunk_frames" in source
+    assert "floor_frames = 81" not in source
+
+
+def test_an_unknown_backend_fails_loudly_before_any_floor_is_resolved(
+    test_clip: Path, tmp_path: Path
+):
+    """An unknown backend is refused by the per-frame resolver first, before the
+    floor probe is ever reached — so the refusal is early and the message names
+    the backend."""
+    from claypipe.config import load_styles
+
+    run = Run.create(
+        source=test_clip, style="clay", fps=12, backend="nonexistent",
+        mode="resynth", clip_title="Bad Backend", duration_s=8.0,
+        source_width=1280, source_height=720,
+        styles=load_styles(), runs_dir=tmp_path / "runs", echo=False,
+    )
+    result = runner.invoke(
+        app, ["canary", "restyle", str(run.paths.root),
+              "--runs-dir", str(tmp_path / "runs"), "--clip-floor"],
+    )
+    assert result.exit_code != 0
+    assert "unknown backend 'nonexistent'" in result.output
+
+
+def test_the_gate_is_unchanged_by_v6(resynth_run: Run):
+    """Same gate, same verdict file, still no override flag (D17)."""
+    assert _canary(resynth_run, "--clip-floor").exit_code == 0
+    reloaded = Run.load(resynth_run.paths.root, echo=False)
+    assert reloaded.manifest.canary_kind == "clip"
+
+    # Without a verdict, batch still refuses.
+    result = runner.invoke(
+        app, ["batch", str(resynth_run.paths.root),
+              "--runs-dir", str(resynth_run.paths.root.parent)],
+    )
+    assert result.exit_code != 0
+    assert "canary" in result.output.lower()

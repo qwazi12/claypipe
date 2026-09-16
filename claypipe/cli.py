@@ -21,6 +21,7 @@ from .pipeline import qccard
 from .pipeline.extract import count_frames, extract_audio, extract_frames, frame_paths
 from .pipeline import burnin, captions, chunks, propagate, shots
 from .pipeline.shots import SEED_BASE
+from .config import BILLED_FRAMES_PER_SECOND
 from .pipeline.layout import LayoutError, source_aspect_of
 from .pipeline.restyle import (
     ChunkLengthError,
@@ -1157,6 +1158,7 @@ CANARY_CAPTION_PRESELECTED = "third slot, selected by `canary restyle`"
 def _canary_restyle_clip(
     run: Run, weights, sources: list[Path], plan, seconds: float,
     prompt: str, profile, ledger, *, base: Path, live: bool,
+    control_signal: str = "depth", resolution: str = "480p",
 ) -> None:
     """Restyle a contiguous trim through a ClipRestyleBackend (T14/A3).
 
@@ -1167,7 +1169,37 @@ def _canary_restyle_clip(
     of a clip is how a temporal model passes a gate it should fail.
     """
     fps = run.manifest.fps
-    want = max(1, int(round(seconds * fps)))
+
+    # V6: resolve the request to a FRAME COUNT, and be explicit that two
+    # different "seconds" are in play. `--clip` is TIMELINE seconds at the
+    # run's fps; the price is quoted in BILLED seconds, which is frames/16.
+    # They are not the same number and confusing them buys the wrong thing:
+    # "the 5.06s floor" is 81 frames, which is 6.75 TIMELINE seconds at 12fps,
+    # so asking for --clip 5.06 would buy 61 frames — below the floor, billed
+    # at the floor anyway.
+    try:
+        floor_frames = get_clip_backend(
+            run.manifest.backend, live=False,
+            control_signal=control_signal, resolution=resolution,
+        ).min_chunk_frames
+    except ValueError as exc:
+        # An unknown clip backend, which is a real refusal. Anything else —
+        # a NameError, a bad signal — is a bug and must surface rather than
+        # quietly resolving the floor to 1 frame, which is what a blanket
+        # `except Exception` did on the first attempt.
+        _fail(str(exc))
+
+    if seconds == 0:
+        want = floor_frames
+        run.logger.info(
+            "canary.restyle.clip_floor",
+            frames=want,
+            timeline_seconds=round(want / fps, 4),
+            billed_seconds=round(want / BILLED_FRAMES_PER_SECOND, 4),
+            reason="asked for the backend's smallest purchasable request",
+        )
+    else:
+        want = max(1, int(round(seconds * fps)))
     if want > len(sources):
         _fail(
             f"--clip {seconds}s is {want} frames at {fps}fps, but the run only "
@@ -1272,9 +1304,12 @@ def _canary_restyle_clip(
         ),
     )
     typer.echo(
-        f"{len(written)} frames ({len(written) / fps:.2f}s) restyled as a CLIP "
-        f"canary from the {anchor} with backend {clip_backend.name!r} — now run "
-        "`claypipe canary render`"
+        f"{len(written)} frames restyled as a CLIP canary from the {anchor} "
+        f"with backend {clip_backend.name!r}.\n"
+        f"  {len(written) / fps:.2f}s on the timeline at {fps}fps, billed as "
+        f"{len(written) / BILLED_FRAMES_PER_SECOND:.4f}s "
+        f"(frames/{BILLED_FRAMES_PER_SECOND}).\n"
+        "  Now run `claypipe canary render`."
     )
 
 
@@ -1295,11 +1330,26 @@ def canary_restyle(
     ),
     clip: Optional[float] = typer.Option(
         None, "--clip",
-        help="Render a CLIP canary of this many seconds instead of three "
-             "stills. REQUIRED for --mode resynth: three frames cannot canary "
-             "a video model. At Track C prices a 3-second canary is $0.12-0.54 "
-             "— the same order as a three-frame canary, so the firewall "
-             "economics are unchanged.",
+        help="Render a CLIP canary instead of three stills. REQUIRED for "
+             "--mode resynth: three frames cannot canary a video model. The "
+             "value is TIMELINE seconds (at the run's fps). Pass 0 — or "
+             "--clip-floor — to ask for exactly the backend's smallest "
+             "purchasable request.",
+    ),
+    control_signal: str = typer.Option(
+        "depth", "--control-signal",
+        help="v2v control signal: depth or pose. fal's VACE offers no canny or "
+             "lineart mode — verified on the API schema.",
+    ),
+    resolution: str = typer.Option(
+        "480p", "--resolution", help="v2v output resolution: 480p, 580p, 720p.",
+    ),
+    clip_floor: bool = typer.Option(
+        False, "--clip-floor",
+        help="Clip canary at the backend's minimum purchasable request. On Wan "
+             "VACE that is 81 frames = 6.75 timeline seconds at 12fps, billed "
+             "as 5.0625 seconds ($0.2025 at 480p). Asking for less buys a "
+             "smaller canary at the same price.",
     ),
 ) -> None:
     """STAGE 1 — restyle ONLY the canary frames (or a short clip), for review.
@@ -1373,13 +1423,16 @@ def canary_restyle(
         run_id=run.run_id, logger=run.logger, max_cost_usd_run=max_cost_usd,
     )
 
-    # ---- T14/A3: the CLIP canary ----------------------------------------
+    # ---- T14/A3 + V6: the CLIP canary -----------------------------------
+    if clip_floor and clip is None:
+        clip = 0.0   # resolved to the backend's floor below
     if clip is not None:
-        if clip <= 0:
-            _fail(f"--clip needs a positive duration, got {clip}")
+        if clip < 0:
+            _fail(f"--clip needs a non-negative duration, got {clip}")
         _canary_restyle_clip(
             run, weights, sources, plan, clip, prompt, profile, ledger,
             base=Path(base), live=live,
+            control_signal=control_signal, resolution=resolution,
         )
         return
 
