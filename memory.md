@@ -1,6 +1,14 @@
 # MEMORY — ClayPipe
 
 ## Current State
+- **ARCHITECTURE CHANGED 2026-09-16: whole-frame video-to-video (Wan VACE on
+  fal), replacing per-frame img2img.** V1-V7 landed. See D59-D64.
+- **V7 RAN AND RETURNED A CLEAR NEGATIVE. $0.6075 spent.** Wan VACE 14B at 480p
+  produces a COLOUR GRADE, not claymation, at both available control signals.
+  SSIM 0.905 — it preserves structure better than the retired img2img gate ever
+  demanded. **Do not proceed to V8 on this configuration.** See D64 for the one
+  untested confound (our own prompt) and the escalation options.
+- pytest **546 passed / 6 skipped / 0 failed**.
 - **T16 IS NOW SPENDABLE, AND UNSPENT. Awaiting the operator.** Everything that
   blocked it is done and free: T9a, T9b, T18a, RUNBOOK.md, CONFIG.md. All fal
   prices verified against the live model pages. See D53 for the budget
@@ -903,7 +911,138 @@
   produce the keyframe budget. Budget against clip A at 28.9/60s, the densest
   under this detector.
 
+- **D59 (2026-09-16, V1) fal's Wan VACE BILLS FRAMES/16, NOT WALL CLOCK.**
+  Verified verbatim on the model page AND llms.txt: "Video seconds are
+  calculated at 16 frames per second." A 60s clip at our 12fps cadence is 720
+  frames = 45 billed seconds = **$1.80** at 480p, not the $2.40 wall-clock
+  implies. At 24fps the same minute is $3.60 — so the CADENCE moves the bill
+  even though duration does not. New `frames_div_16` unit sits alongside
+  `video_second` (Qwen Cloud's Wan 3.0 bills wall-clock); each REFUSES the
+  other's dimension rather than silently mispricing.
+  `BILLED_FRAMES_PER_SECOND = 16` in config.py carries the quote.
+- **D60 (2026-09-16, V2) THERE IS NO CANNY ON VACE. ANYWHERE.** fal's `task`
+  enum is `depth | pose | inpainting | outpainting | reframe` — verified on the
+  wan-vace-14b API page, its llms.txt, and wan-22-vace-fun-a14b; the deprecated
+  wan-vace has only depth+inpainting. No lineart, no scribble, and no
+  passthrough for a pre-processed control video. **The silhouette-locking
+  signal the plan assumed is not purchasable at any price**, so the three-way
+  canary was always a two-way one. Requesting canny raises rather than silently
+  substituting depth.
+  Also verified: num_frames 81-241 inclusive, frames_per_second 5-30,
+  resolutions auto|240p|360p|480p|580p|720p (only 480/580/720 are priced).
+- **D61 (2026-09-16, V3) PROPAGATION RETIRED, AND THE GHOSTING DEFECT DELETED
+  WITH IT.** A video model bills per frame or per second whether or not frames
+  were warped, so propagation saves nothing under v2v and costs fidelity. With
+  no warped frames, nothing can inherit a stale caption from a keyframe — D52's
+  defect is gone rather than mitigated. `surface` is the retired track, kept one
+  release.
+  **A sequencing note worth keeping:** flipping intake's default to `resynth`
+  before V5 built the resynth batch path broke 15 tests, and the cause was not
+  the tests — the default mode could not complete a batch. The fix was a test
+  asserting the INVARIANT (whatever mode is default must complete a batch end
+  to end) rather than the value, so the flip could not happen early and could
+  not be forgotten.
+- **D62 (2026-09-16, V4) FLOW IS THE PRIMARY GATE; TF IS NO LONGER CIRCULAR; ID
+  IS SCOPED TO CHARACTER REGIONS.**
+  FLOW = 1 - normalised endpoint error between the output's flow field and the
+  SOURCE's. Validated before wiring: identical motion 1.0000, half-speed 0.5292,
+  frozen 0.3270, reversed 0.0000. **It is not TF** — a frozen output scores TF
+  1.0000 and FLOW < 0.6. It already earned its place by reporting 0.00-0.40 on
+  the retired propagation output, catching the desync T18a's whole-frame SSIM
+  was structurally blind to.
+  **TF's circularity was propagation-specific** (a warped frame graded by a
+  warp). V3 retired propagation, so TF measures a real property again. **Do not
+  re-flag it.**
+  ID scoped to character regions, because under whole-frame restyle the
+  environment is rebuilt in clay too and dominates a whole-frame embedding.
+  **A CROP MUST BE COMPARED AGAINST A CROP** — my first attempt scored crops
+  against whole-frame references, which asks CLIP whether a person resembles a
+  scene; it depressed ID enough to miss id_min on most frames, exhaust the
+  retry budget and halt the run. Region references are now cropped from the
+  approved canary, and ID falls back to whole-frame with the support LABELLED
+  (`regions:N` / `whole_frame` / `whole_frame:no_region_refs`).
+  **No thresholds set.** `flow_min` is 0.0 — report, do not gate — with a test
+  asserting it stays 0.0 until a canary measures one. FLOW is a COMPONENT
+  TARGET, not a term in F: re-weighting the composite would invent a weight for
+  an uncalibrated metric.
+- **D63 (2026-09-16, V5/V6) ONE SEED PER RUN, SEAMS ON CUTS, AND TWO KINDS OF
+  SECOND.**
+  **One seed for the WHOLE RUN, inverting T11.** Per-shot seeding was right for
+  img2img (seed drives retry variety); under v2v the seed drives the generated
+  DESIGN, so changing it between chunks redesigns the character at every seam.
+  Chunks accumulate whole shots so seams land on cuts, where a design shift is
+  invisible. On the Sheldon clip: 711 frames, 26 shots -> 4 chunks, 3 seams,
+  ZERO mid-shot. A forced mid-shot seam is REPORTED, never silent.
+  **The units trap:** VACE's 81-frame floor is 6.75 TIMELINE seconds but 5.0625
+  BILLED seconds. Typing `--clip 5.06` buys 61 frames — under the floor, billed
+  at the floor anyway. `--clip-floor` reads the minimum off the backend and
+  prints both figures.
+  **A hard product constraint:** a source under 81 frames (6.75s at 12fps)
+  cannot be canaried or batched at all. The bundled test clip went 5s -> 8s for
+  this reason.
+- **D64 (2026-09-16, V7) THE CANARY RAN. VACE RETURNS A COLOUR GRADE, NOT CLAY.
+  $0.6075 SPENT. DO NOT PROCEED TO V8 ON THIS CONFIGURATION.**
+  Two signals, 480p, 81 frames each, on the Sheldon clip:
+  |        | FLOW | TF | SSIM | LPIPS-e |
+  |---|---|---|---|---|
+  | depth | 0.7358 | 0.9735 | **0.9050** | 0.1534 |
+  | pose | 0.7057 | 0.9748 | **0.8546** | 0.2370 |
+  Both returned the same photoreal footage with a heavy orange/teal grade —
+  same faces, same geometry, same composition, no clay texture.
+  **SSIM 0.905 is the damning number: the RETIRED img2img gate demanded 0.72,
+  so this "resynthesis" preserves structure BETTER than the per-frame path was
+  ever asked to.** A model scoring 0.85-0.91 against its own input has not
+  resynthesised anything.
+  ID deliberately not reported: it scores against the APPROVED canary (T10/F1)
+  and nothing is approved — measuring against the source would reproduce the
+  photoreal-reference bug F1 documents.
+  **THE ONE UNTESTED CONFOUND IS OURS, NOT THE MODEL'S.** The `clay` prompt
+  ends "keep exact same composition, pose, camera angle, framing and colors" —
+  written for img2img, where preserving the frame was the point. Under
+  whole-frame v2v it instructs the model to change nothing, INCLUDING COLORS,
+  which is close to a description of what came back. **Try the prompt before
+  concluding VACE cannot do clay.** It is the cheapest variable and it is
+  untested.
+  Escalation options, in cost order: rewrite the prompt (~$0.20 to retest);
+  580p/720p (~$0.30/$0.41 per canary); Runway Gen-4.5 Aleph ($0.91 for the same
+  trim, $10.80/minute).
+- **D65 (2026-09-16) A PAID GENERATION WAS LOST TO A TRUST-STORE MISMATCH.**
+  The download used urllib (SYSTEM trust store) while fal_client uses httpx
+  (certifi). Behind TLS interception the upload and the generation both
+  SUCCEEDED and only the download failed — charged $0.2025 for a result never
+  retrieved. Now downloaded with httpx, and the error says the spend is in the
+  ledger as authorised-but-unreconciled. The stranded entry is PRESERVED as
+  `spend_ledger.stranded.jsonl`.
+  **Generalisation worth keeping: any code path that spends money must use the
+  same HTTP client as the SDK that spent it**, or a trust/proxy difference
+  turns a successful purchase into a lost one.
+- **D66 (2026-09-16) C4 DID NOT EXIST, THOUGH THE BRIEF SAID IT DID.** §3 listed
+  caption inpainting as surviving and §6 said "C4 already handles it"; there was
+  no inpainting anywhere and no C4 task in memory.md or MASTER_PLAN.md. T9b only
+  DETECTS. Built it: Telea inpaint over the T9b band, applied to the GENERATOR'S
+  INPUT only — the original panel keeps its captions, the audio is untouched.
+  Deliberately cheap, because its output feeds a model about to restyle the
+  whole frame and stylisation covers the artifacts.
+  The band had to be SCALED out of T9b's probe space (fixed 640px width) or it
+  masks the wrong strip on every frame, and grown 25% because outlines extend
+  past the detected ink.
+  **And it had to be wired into the CANARY too, not just batch** — the first
+  canary judged raw frames and its output still carried the captions production
+  would have stripped. A canary that does not see what production sees is not a
+  canary.
+
 ## Pending / Next
+- **THE DECISION IN FRONT OF THE OPERATOR (D64): V8 is NOT recommended on this
+  configuration.** VACE returned a colour grade. In cost order:
+  1. **Rewrite the `clay` prompt and retest (~$0.20).** Cheapest, and the only
+     untested variable that is ours. Strip "keep exact same composition, pose,
+     camera angle, framing and colors" — it is an img2img instruction telling a
+     v2v model to change nothing.
+  2. **Higher resolution** (~$0.30 at 580p, ~$0.41 at 720p per canary).
+  3. **Runway Gen-4.5 Aleph**, $0.91 for the same 5.06s trim, $10.80/minute.
+     The quality ceiling, priced accordingly.
+- **Balance check before any further spend.** $0.6075 of the ~$10 fal balance
+  is gone. A full V8 run at 480p would be $1.80 (720 frames / 16 x $0.04).
 - **T16 IS READY TO RUN AND NEEDS TWO OPERATOR DECISIONS FIRST (D53):**
   1. **B1** — confirm `FAL_KEY` was rotated. The first version of this
      session's brief confirmed it; the re-sent version deleted that line, so it
@@ -987,6 +1126,18 @@
 - RUNBOOK.md / CONFIG.md (Rule 33) not written yet — due with step 6.
 
 ## Log (append-only, newest first)
+
+### 2026-09-16 — v2v architecture: V1-V7 landed; the canary says no
+- V1 frames_div_16 pricing (D59), V2 VaceBackend (D60), V3 propagation retired
+  (D61), V4 metric vector with FLOW (D62), V5 shot-aligned chunking + V6 clip
+  floor (D63), C4 caption inpainting (D66), V7 the paid canary (D64, D65).
+- Commits: ec30116, f918c97, 2587f2e, 5571de0, c0ca0a6, cef1b30, 1c1d9b4,
+  f9eb464. All pushed.
+- **$0.6075 spent. V7 returned a clear negative.** Four defects found by
+  RUNNING it, three of which cost or nearly cost money — see D64/D65.
+- pytest 546 passed / 6 skipped / 0 failed.
+- NOT done: V8 (blocked on the D64 decision). B2 and B3 untouched and still
+  blocking the publish and dashboard tasks respectively.
 
 ### 2026-09-15 — T9a, T9b, T18a, RUNBOOK+CONFIG; T16 verified but UNSPENT
 - **T9a** aspect-fit layout (D54). Commit `79142f0`. Square sources work.
