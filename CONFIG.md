@@ -276,6 +276,8 @@ session can re-check one line instead of re-researching the table.
 | `wan_vace_480p` | `fal-ai/wan-vace-14b` | **frames_div_16** | 0.04 | — |
 | `wan_vace_580p` | `fal-ai/wan-vace-14b` | **frames_div_16** | 0.06 | — |
 | `wan_vace_720p` | `fal-ai/wan-vace-14b` | **frames_div_16** | 0.08 | — |
+| `wan_edit_720p` | `fal-ai/wan/v2.7/edit-video` | video_second | 0.10 | — |
+| `wan_edit_1080p` | `fal-ai/wan/v2.7/edit-video` | video_second | 0.15 | — |
 | `qwen_cloud_wan3_480p` | Qwen Cloud Wan 3.0 | video_second | 0.035 | — |
 | `runway_aleph` | (deferred) | video_second | 0.18 | — |
 
@@ -287,6 +289,14 @@ structure-conditioning together with a claymation LoRA. It is 3x Kontext
 Wan VACE's `num_frames` is constrained to **81-241 inclusive** at 16fps native,
 so the smallest purchasable request is 81/16 = **5.0625 video-seconds =
 $0.2025**. `DummyClipBackend` mirrors those bounds deliberately.
+
+**`wan_edit_*` is the endpoint that actually produces claymation.** VACE's
+`depth`/`pose` are CONTROL modes whose job is to hold geometry, and across two
+paid runs they returned the input with a colour grade (SSIM 0.905, 0.744).
+`fal-ai/wan/v2.7/edit-video` is instruction-driven style transfer with no
+control signal to fight, and it converted on the first successful call (SSIM
+0.141). It is duration-driven, requires **input at 16fps or above**, and bills
+WALL-CLOCK seconds — a different unit from VACE in the same model family.
 
 ### The two video units are not interchangeable
 

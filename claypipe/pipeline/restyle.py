@@ -209,8 +209,17 @@ def get_clip_backend(
             negative_prompt=negative_prompt,
             guidance_scale=guidance_scale,
         )
+    if name in ("wan_edit", "wan27", "wan_v27_edit"):
+        from .wanedit import WanEditBackend, get_wan_edit_client
+
+        return WanEditBackend(
+            live=live,
+            client=get_wan_edit_client(live=live),
+            resolution=resolution if resolution in ("720p", "1080p") else "720p",
+        )
     raise ValueError(
-        f"unknown clip backend {name!r} (available: dummy_clip, wan_vace)."
+        f"unknown clip backend {name!r} "
+        "(available: dummy_clip, wan_vace, wan_edit)."
     )
 
 
@@ -290,19 +299,28 @@ def restyle_clip_range(
 
         entry_id = None
         if ledger is not None:
+            # BOTH dimensions are supplied and the PRICE MODEL picks the one
+            # its unit needs. Clip backends do not agree on a billing unit —
+            # VACE bills frames/16, Wan 2.7 Edit bills wall-clock seconds — and
+            # hardcoding either here makes the other unpriceable. The firewall
+            # caught exactly that, twice, before any call went out.
             entry_id = ledger.authorize(
                 frame=f"clip_{chunk[0].stem}-{chunk[-1].stem}",
-                backend=ledger_key, stage="batch", frames=len(chunk),
+                backend=ledger_key, stage="batch",
+                frames=len(chunk), video_seconds=len(chunk) / fps,
             )
         produced = backend.restyle_clip(
             chunk, out_dir, prompt=prompt, strength=strength, seed=seed + chunk_index
         )
         if ledger is not None and entry_id is not None:
+            # Reconcile through the same price model rather than recomputing,
+            # so the actual can never diverge from the estimate by using a
+            # different divisor than the ledger did.
             ledger.reconcile(
                 entry_id,
-                backend.cost_per_video_second_usd()
-                * len(chunk)
-                / BILLED_FRAMES_PER_SECOND,
+                ledger.cfg.cost.price_for(
+                    ledger_key, frames=len(chunk), video_seconds=len(chunk) / fps
+                ),
             )
 
         if len(produced) != len(chunk):

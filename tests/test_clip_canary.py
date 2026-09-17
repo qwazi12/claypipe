@@ -308,9 +308,11 @@ def test_chunks_are_authorised_in_frames_not_seconds(test_clip: Path, tmp_path: 
     for record in records:
         assert record["unit"] == "frames_div_16"
         assert record["frames"] is not None
-        assert record["video_seconds"] is None, (
-            "a frames_div_16 backend must not be authorised against a duration"
-        )
+        # BOTH dimensions are now supplied and the PRICE MODEL picks the one
+        # its unit needs — clip backends disagree about billing (VACE bills
+        # frames/16, Wan 2.7 Edit bills wall-clock), so hardcoding either at
+        # the call site makes the other unpriceable.
+        assert record["video_seconds"] is not None
         # billed_units is frames/16, which is what reconciles against a bill.
         assert record["billed_units"] == pytest.approx(record["frames"] / 16)
         assert record["frame"].startswith("clip_")

@@ -222,6 +222,20 @@ firewalls:
         unit: frames_div_16
         rate: 0.08
 
+      # fal-ai/wan/v2.7/edit-video -- the PROMPT-DRIVEN restyle endpoint.
+      # "Your request will cost $0.1 for 720p and $0.15 for 1080p per second of
+      # output video." Verified 2026-09-17.
+      #
+      # WALL-CLOCK seconds, unlike VACE's frames/16 — a different endpoint in
+      # the same family billing a different way, which is exactly why the price
+      # model carries both units.
+      wan_edit_720p:
+        unit: video_second
+        rate: 0.10
+      wan_edit_1080p:
+        unit: video_second
+        rate: 0.15
+
       # Kept as a WALL-CLOCK example so the two video units stay visibly
       # distinct and neither backend has to be approximated by the other.
       # Qwen Cloud Wan 3.0: $0.035 per wall-clock second at 480p, 30s max per
