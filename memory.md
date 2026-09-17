@@ -1,6 +1,12 @@
 # MEMORY — ClayPipe
 
 ## Current State
+- **2026-09-17: clay prompt rewritten and tested. STILL PHOTOREAL. $0.9075 spent
+  in total.** See D67. The run tested the main prompt ONLY — a bare call site
+  dropped the negative prompt, the guidance scale, and the `pose` signal.
+- **VACE HAS NO CONTROL-STRENGTH PARAMETER** (verified schema). It has
+  `guidance_scale` (default 5), which is the opposite lever: raising it pushes
+  toward the prompt. That lever is STILL UNTESTED.
 - **ARCHITECTURE CHANGED 2026-09-16: whole-frame video-to-video (Wan VACE on
   fal), replacing per-frame img2img.** V1-V7 landed. See D59-D64.
 - **V7 RAN AND RETURNED A CLEAR NEGATIVE. $0.6075 spent.** Wan VACE 14B at 480p
@@ -1031,7 +1037,55 @@
   would have stripped. A canary that does not see what production sees is not a
   canary.
 
+- **D67 (2026-09-17) THE PROMPT WAS NOT THE (ONLY) PROBLEM, AND SSIM IS NOT THE
+  CLAY GATE.**
+  The `clay` prompt was rewritten as specified: preservation clause DELETED
+  (not softened), material and process described (thumbprints, tool marks,
+  seams), and the WORLD restyled explicitly for R3. `negative_prompt` and
+  `guidance_scale` were added to `StyleProfile`.
+  **Result: still photoreal.** Zoomed 3x, the output is the same human skin,
+  hair strands and fabric weave under a heavier orange wash.
+  **SSIM MOVED A LOT AND MEANS LESS THAN IT LOOKS: 0.7436 against V7's 0.9050,
+  below the 0.85 "it resynthesised" line — and it did not resynthesise.** SSIM
+  is luma-only, so a heavy colour grade shifts the luminance distribution far
+  enough to move it. It cannot distinguish "re-sculpted in clay" from "lit
+  differently". Compounding it, the two runs used DIFFERENT TRIMS (V7 read
+  frames 104-184, this read 34-44s), so the comparison was never controlled.
+  **Do not use SSIM alone as the clay gate.** Judging the material needs a
+  zoomed look at a face, or a texture/material metric that does not yet exist.
+  **VACE SCHEMA, verified:** no control-strength, conditioning-scale or denoise
+  parameter exists. `guidance_scale` (float, default 5) is the only lever on the
+  prompt-versus-input balance and works the OPPOSITE way from a control
+  strength — raising it pushes toward the prompt. Also present:
+  `negative_prompt`, `num_inference_steps` (30), `shift` (5), `sampler`,
+  `video_quality`.
+  The C4 inpaint band is STILL VISIBLE in the output, so the "stylisation hides
+  the inpaint" assumption remains untested — the restyle never fired hard
+  enough to cover anything.
+- **D68 (2026-09-17) A BARE CALL SITE HAS NOW COST A PAID RUN TWICE.**
+  `get_clip_backend` had a THIRD site — the canary's own construction — written
+  as `get_clip_backend(run.manifest.backend, live=live)`, silently taking every
+  default. So a run invoked with `--control-signal pose` and a style carrying
+  negatives and guidance 7.5 executed as DEPTH with neither.
+  Two contributing causes, both mine: a patch script asserted and exited BEFORE
+  writing, so a fix reported as applied never reached the file; and the v2v site
+  still carried `except (ValueError, Exception)` — the same over-broad catch
+  that previously let a NameError resolve a clip floor to one frame.
+  **A test now greps the source and fails if ANY
+  `clip_backend = get_clip_backend(...)` omits control_signal, resolution,
+  negative_prompt or guidance_scale.** Verify a paid call's arguments from the
+  RUN LOG before trusting that a flag took effect.
+
 ## Pending / Next
+- **THE NEXT $0.30 IS THE ONE THE LAST $0.30 WAS MEANT TO BE**: pose + the new
+  negative prompt + guidance_scale 7.5, all of which are now actually wired.
+  That is the last cheap variable before Aleph. Awaiting the operator — the
+  authorised run was spent on my wiring bug, so re-spending is their call.
+- **If that is still photoreal, VACE is structurally the wrong model.** It is a
+  control-and-edit model; Aleph is prompt-driven restyle. Aleph at
+  $0.18/video-second is $1.35 for this same 10s trim (120 frames / 16 x $0.18),
+  $10.80/minute. Do not run without checking in.
+- Balance: **$0.9075 spent, ~$9.09 of the fal balance left.**
 - **THE DECISION IN FRONT OF THE OPERATOR (D64): V8 is NOT recommended on this
   configuration.** VACE returned a colour grade. In cost order:
   1. **Rewrite the `clay` prompt and retest (~$0.20).** Cheapest, and the only
@@ -1126,6 +1180,17 @@
 - RUNBOOK.md / CONFIG.md (Rule 33) not written yet — due with step 6.
 
 ## Log (append-only, newest first)
+
+### 2026-09-17 — clay prompt rewritten; still photoreal; a bare call site bit
+- Prompt rewritten, `negative_prompt` + `guidance_scale` added to StyleProfile
+  and plumbed through (D67). Schema checked first: no control-strength param.
+- $0.30 spent. Result still photoreal. SSIM 0.7436 — moved a long way and
+  means less than it looks (D67).
+- A third `get_clip_backend` call site was bare, so the run tested the main
+  prompt only, not pose/negatives/guidance (D68). Fixed, with a source-grep
+  test so it cannot recur.
+- Commit da034b7. pytest 551 passed / 6 skipped / 0 failed.
+- NOT done: the intended pose+negatives+guidance run. V8 still not started.
 
 ### 2026-09-16 — v2v architecture: V1-V7 landed; the canary says no
 - V1 frames_div_16 pricing (D59), V2 VaceBackend (D60), V3 propagation retired
