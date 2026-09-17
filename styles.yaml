@@ -36,10 +36,39 @@ output:
 
 styles:
   clay:
-    prompt: >-
-      claymation, plasticine clay stop-motion, fingerprints in clay, handmade
-      miniature set, Aardman style, keep exact same composition, pose, camera
-      angle, framing and colors
+    # Rewritten 2026-09-17 after V7 returned photoreal footage with a colour
+    # grade. The previous prompt ended "keep exact same composition, pose,
+    # camera angle, framing and colors" — an img2img-era clause where
+    # preserving the frame was the point. Under whole-frame v2v it is an
+    # instruction to RETURN THE INPUT, which is close to what came back.
+    #
+    # The preservation clause is DELETED, not softened. Motion and timing come
+    # from the control signal, not from the prompt.
+    #
+    # Two deliberate properties: it describes a MATERIAL AND A PROCESS
+    # (thumbprints, tool marks, seams, hand-shaped) rather than a look, and it
+    # restyles the WORLD explicitly. R3 needs the environment to convert, and
+    # the old prompt never asked for it.
+    prompt: >
+      claymation stop-motion animation. Every person is a sculpted
+      plasticine figurine: hand-modelled head with oversized rounded
+      features, simplified stubby fingers, visible thumbprints and
+      sculpting-tool marks pressed into the clay, faint seams where the
+      limbs join the body, matte clay surface with a soft waxy sheen.
+      The entire room is a handmade miniature set — modelled clay walls,
+      clay furniture, clay props, painted card and felt textures, every
+      edge slightly uneven and asymmetric the way hand-shaped clay is.
+      Warm practical lighting on a tabletop set, shallow depth of field,
+      subtle stop-motion imperfection.
+    negative_prompt: >
+      photorealistic, live action, real people, human skin, photograph,
+      film still, CGI, 3D render, smooth plastic, glossy toy, video game,
+      digital art, flat cartoon, 2D illustration, anime, text, subtitles
+    # Prompt adherence. VACE's default is 5; raised because V7 showed the model
+    # ignoring the prompt in favour of the input. There is NO control-strength
+    # parameter on this endpoint, so this is the only lever on that balance —
+    # and it works the opposite way from one: raising pushes toward the prompt.
+    guidance_scale: 7.5
     strength: 0.65
     background_color: "#F2C230"
     header_text_color: "#1A1A1A"

@@ -84,6 +84,14 @@ class StyleProfile(BaseModel):
     strength: float = Field(gt=0.0, le=1.0)
     background_color: HexColor
     header_text_color: HexColor
+    # What the restyle must NOT produce. Accepted by fal's Wan VACE
+    # (`negative_prompt` is in the schema, verified 2026-09-17). Empty is
+    # legitimate — it simply sends nothing.
+    negative_prompt: str = ""
+    # Prompt adherence. VACE's `guidance_scale` defaults to 5; higher pushes
+    # the model toward the prompt and away from the input. null leaves the
+    # endpoint default alone rather than pinning a number we have not measured.
+    guidance_scale: float | None = Field(default=None, gt=0.0, le=20.0)
 
 
 class StylesConfig(BaseModel):

@@ -62,13 +62,14 @@ class StubClient:
 
     def generate_video(
         self, *, video_path, prompt, negative_prompt, task, resolution,
-        num_frames, frames_per_second, seed, model,
+        num_frames, frames_per_second, seed, model, guidance_scale=None,
     ) -> bytes:
         self.calls.append({
             "video_path": Path(video_path), "prompt": prompt,
             "negative_prompt": negative_prompt, "task": task,
             "resolution": resolution, "num_frames": num_frames,
             "frames_per_second": frames_per_second, "seed": seed, "model": model,
+            "guidance_scale": guidance_scale,
         })
         count = self.frames_returned if self.frames_returned is not None else num_frames
         out = Path(video_path).parent / f"stub_{count}.mp4"
@@ -359,3 +360,56 @@ def test_decode_emits_exactly_the_frames_present(tmp_path: Path):
     out.mkdir()
     written = _decode(video, out, names=[f"f_{i:05d}.png" for i in range(1, 10)])
     assert len(written) == 9
+
+
+# ---------------------------------------------------------------------------
+# Prompt controls (2026-09-17). VACE has NO control-strength or
+# conditioning-scale parameter — verified on the schema — so `guidance_scale`
+# is the only lever on the prompt-versus-input balance, and it works the
+# OPPOSITE way from a control strength: raising it pushes toward the prompt.
+# ---------------------------------------------------------------------------
+
+def test_the_negative_prompt_reaches_the_endpoint(source_frames, tmp_path: Path):
+    client = StubClient()
+    backend = _backend(client=client, negative_prompt="photorealistic, live action")
+    backend.restyle_clip(source_frames, tmp_path / "out", prompt="clay",
+                         strength=0.65, seed=1000)
+    assert client.calls[0]["negative_prompt"] == "photorealistic, live action"
+
+
+def test_guidance_scale_reaches_the_endpoint(source_frames, tmp_path: Path):
+    client = StubClient()
+    backend = _backend(client=client, guidance_scale=7.5)
+    backend.restyle_clip(source_frames, tmp_path / "out", prompt="clay",
+                         strength=0.65, seed=1000)
+    assert client.calls[0]["guidance_scale"] == pytest.approx(7.5)
+
+
+def test_an_unset_guidance_scale_leaves_the_endpoint_default_alone(
+    source_frames, tmp_path: Path
+):
+    """null means "do not pin a number we have not measured", not "send 0"."""
+    client = StubClient()
+    backend = _backend(client=client)
+    assert backend.guidance_scale is None
+    backend.restyle_clip(source_frames, tmp_path / "out", prompt="clay",
+                         strength=0.65, seed=1000)
+    assert client.calls[0]["guidance_scale"] is None
+
+
+def test_the_shipped_clay_style_carries_the_rewritten_prompt():
+    """V7's failure was traced to the prompt telling the model to change
+    nothing. The preservation clause must stay deleted, not softened."""
+    from claypipe.config import load_styles
+
+    clay = load_styles().profile("clay")
+    assert "keep exact same" not in clay.prompt
+    assert "framing and colors" not in clay.prompt
+    # It must describe a MATERIAL AND PROCESS, not just a look...
+    for token in ("thumbprint", "tool marks", "seams", "plasticine"):
+        assert token in clay.prompt.lower(), token
+    # ...and restyle the WORLD, not only the people (R3).
+    for token in ("miniature set", "clay walls", "clay furniture"):
+        assert token in clay.prompt.lower(), token
+    assert "photorealistic" in clay.negative_prompt.lower()
+    assert clay.guidance_scale is not None and clay.guidance_scale > 5.0

@@ -99,6 +99,7 @@ class VaceClientLike(Protocol):
         frames_per_second: int,
         seed: int,
         model: str,
+        guidance_scale: float | None,
     ) -> bytes:
         """Return the generated MP4 bytes, or raise VaceError."""
 
@@ -117,6 +118,7 @@ class VaceBackend:
     resolution: str = "480p"
     model: str = DEFAULT_VACE_MODEL
     negative_prompt: str = ""
+    guidance_scale: float | None = None
     _cfg: object | None = None
     planned_calls: list[dict] = field(default_factory=list)
 
@@ -258,6 +260,7 @@ class VaceBackend:
             frames_per_second=self.native_fps,
             seed=seed,
             model=self.model,
+            guidance_scale=self.guidance_scale,
         )
         if not payload:
             raise VaceError("VACE returned an empty response body")
@@ -285,6 +288,7 @@ class VaceBackend:
             "model": self.model,
             "ledger_backend": self.ledger_backend,
             "task": self.control_signal,
+            "guidance_scale": self.guidance_scale,
             "resolution": self.resolution,
             "num_frames": count,
             "frames_per_second": self.native_fps,
@@ -358,7 +362,7 @@ class _FalVaceClient:  # pragma: no cover - requires network and a credential
 
     def generate_video(
         self, *, video_path, prompt, negative_prompt, task, resolution,
-        num_frames, frames_per_second, seed, model,
+        num_frames, frames_per_second, seed, model, guidance_scale=None,
     ) -> bytes:
         import fal_client
 
@@ -374,6 +378,13 @@ class _FalVaceClient:  # pragma: no cover - requires network and a credential
         }
         if negative_prompt:
             arguments["negative_prompt"] = negative_prompt
+        if guidance_scale is not None:
+            # VACE has NO control-strength or conditioning-scale parameter —
+            # verified on the schema. `guidance_scale` is the only lever on the
+            # prompt-versus-input balance, and it works the opposite way round
+            # from a control strength: RAISING it pushes toward the prompt,
+            # where lowering a control strength would weaken the input.
+            arguments["guidance_scale"] = guidance_scale
         try:
             result = fal_client.subscribe(model, arguments=arguments)
         except Exception as exc:

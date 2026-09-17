@@ -20,6 +20,7 @@ from .pipeline import assemble as assemble_stage
 from .pipeline import qccard
 from .pipeline.extract import count_frames, extract_audio, extract_frames, frame_paths
 from .pipeline import burnin, captions, chunks, inpaint, propagate, shots
+from .pipeline.vace import VaceError
 from .pipeline.shots import SEED_BASE
 from .config import BILLED_FRAMES_PER_SECOND
 from .pipeline.layout import LayoutError, source_aspect_of
@@ -393,11 +394,14 @@ def _run_v2v(
         clip_backend = get_clip_backend(
             run.manifest.backend, live=live,
             control_signal=control_signal, resolution=resolution,
+            negative_prompt=profile.negative_prompt,
+            guidance_scale=profile.guidance_scale,
         )
-    except (ValueError, Exception) as exc:
-        if isinstance(exc, (ValueError,)) or exc.__class__.__name__ == "VaceError":
-            _fail(str(exc))
-        raise
+    except (ValueError, VaceError) as exc:
+        # Narrow, on purpose. `except (ValueError, Exception)` catches
+        # everything, which is how a NameError once resolved a clip floor to
+        # one frame and cost a call.
+        _fail(str(exc))
 
     run_seed = SEED_BASE
     chunk_plan = chunks.plan_chunks(
@@ -1300,7 +1304,12 @@ def _canary_restyle_clip(
 
     chunk = control_source[start - 1 : start - 1 + want]
     try:
-        clip_backend = get_clip_backend(run.manifest.backend, live=live)
+        clip_backend = get_clip_backend(
+            run.manifest.backend, live=live,
+            control_signal=control_signal, resolution=resolution,
+            negative_prompt=profile.negative_prompt,
+            guidance_scale=profile.guidance_scale,
+        )
     except ValueError as exc:
         _fail(str(exc))
 
@@ -1370,6 +1379,8 @@ def _canary_restyle_clip(
         frames=len(written), seconds=round(len(written) / fps, 3),
         first_frame=chunk[0].name, last_frame=chunk[-1].name,
         anchor=anchor, seed=seed,
+        negative_prompt_chars=len(getattr(clip_backend, "negative_prompt", "")),
+        guidance_scale=getattr(clip_backend, "guidance_scale", None),
         native_fps=clip_backend.native_fps, pipeline_fps=fps,
         scored=False,
         reason="no identity references exist yet — T10 makes the approved "

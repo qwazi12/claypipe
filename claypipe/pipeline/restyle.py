@@ -190,6 +190,8 @@ def get_clip_backend(
     live: bool = False,
     control_signal: str = "depth",
     resolution: str = "480p",
+    negative_prompt: str = "",
+    guidance_scale: float | None = None,
 ) -> ClipRestyleBackend:
     """Track C backends. Separate resolver, because the protocols are separate
     (A4) and a caller that wants a clip backend must not silently receive a
@@ -204,6 +206,8 @@ def get_clip_backend(
             client=get_vace_client(live=live),
             control_signal=control_signal,
             resolution=resolution,
+            negative_prompt=negative_prompt,
+            guidance_scale=guidance_scale,
         )
     raise ValueError(
         f"unknown clip backend {name!r} (available: dummy_clip, wan_vace)."

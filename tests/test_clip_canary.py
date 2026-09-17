@@ -473,3 +473,31 @@ def test_the_gate_is_unchanged_by_v6(resynth_run: Run):
     )
     assert result.exit_code != 0
     assert "canary" in result.output.lower()
+
+
+def test_every_clip_backend_call_site_passes_the_full_configuration():
+    """A BARE CALL SITE COST A PAID RUN, TWICE.
+
+    `get_clip_backend(run.manifest.backend, live=live)` silently used the
+    DEFAULTS — depth, 480p, no negative prompt, no guidance scale — so a
+    canary invoked with `--control-signal pose` and a style carrying negatives
+    ran as depth with none of them, and the operator paid $0.30 for an
+    experiment that did not test what it was meant to.
+
+    Every construction site must pass the configuration, not rely on defaults.
+    """
+    import inspect
+    import re
+
+    from claypipe import cli
+
+    source = inspect.getsource(cli)
+    # Every call that CONSTRUCTS a backend (not the floor probe, which only
+    # reads min_chunk_frames) must carry the signal and the prompt controls.
+    for match in re.finditer(r"clip_backend = get_clip_backend\((.*?)\n        \)", source, re.S):
+        call = match.group(1)
+        for required in ("control_signal", "resolution", "negative_prompt",
+                         "guidance_scale"):
+            assert required in call, (
+                f"a get_clip_backend call site omits {required!r}:\n{call}"
+            )
